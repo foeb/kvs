@@ -1,9 +1,7 @@
 use crate::log::{Log, LogEntry};
-use failure::Error;
+use crate::Result;
+use std::fs::OpenOptions;
 use std::path::Path;
-
-/// Return type for KvStore operations.
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// The `KvStore` stores string key/value pairs.
 ///
@@ -23,18 +21,27 @@ pub struct KvStore {
 }
 
 impl KvStore {
-    /// Creates a `KvStore`.
-    pub fn new() -> KvStore {
-        KvStore {
-            log: Log::default(),
-        }
+    /// Creates a `KvStore` by opening the given path as a log.
+    pub fn open(path: &Path) -> Result<KvStore> {
+        let file_path = if path.is_dir() {
+            path.join("wal")
+        } else {
+            path.to_owned()
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(file_path)?;
+        let log = Log::new(file)?;
+        Ok(KvStore { log })
     }
 
     /// Sets the value of a string key to a string.
     ///
     /// If the key already exists, the previous value will be overwritten.
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        Ok(self.log.push(LogEntry::Set(key, value)))
+        self.log.push(LogEntry::Set(key, value))
     }
 
     /// Gets the string value of a given string key.
@@ -46,11 +53,6 @@ impl KvStore {
 
     /// Remove a given key.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        Ok(self.log.push(LogEntry::Rm(key)))
-    }
-
-    /// Open file containing log for processing.
-    pub fn open(_path: &Path) -> Result<Self> {
-        Ok(KvStore::new())
+        self.log.push(LogEntry::Rm(key))
     }
 }
