@@ -1,8 +1,10 @@
 use clap::{App, AppSettings, Arg, SubCommand};
 use kvs::{KvStore, Result};
 use std::env::current_dir;
+use env_logger;
 
 fn main() -> Result<()> {
+    env_logger::init();
     let matches = App::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
@@ -43,7 +45,7 @@ fn main() -> Result<()> {
         ("get", Some(matches)) => {
             let key = matches.value_of("KEY").expect("KEY argument missing");
 
-            let store = KvStore::open(current_dir()?.as_path())?;
+            let mut store = KvStore::open(current_dir()?.as_path())?;
             if let Some(value) = store.get(key.to_string())? {
                 println!("{}", value);
             } else {
