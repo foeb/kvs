@@ -1,7 +1,10 @@
 use clap::{App, AppSettings, Arg, SubCommand};
-use kvs::{KvStore, Result};
-use std::env::current_dir;
 use env_logger;
+
+use kvs::{KvStore, Result, Error};
+
+use std::env::current_dir;
+use std::process::exit;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -53,11 +56,15 @@ fn main() -> Result<()> {
             }
         }
         ("rm", Some(matches)) => {
-            let key = matches.value_of("KEY").expect("KEY argument missing");
+            let key = matches.value_of("KEY").expect("KEY argument missing").to_owned();
 
             let mut store = KvStore::open(current_dir()?.as_path())?;
-            match store.remove(key.to_string()) {
+            match store.remove(key) {
                 Ok(()) => {}
+                Err(Error::NonExistentKey(_)) => {
+                    println!("Key not found");
+                    exit(1);
+                }
                 Err(e) => return Err(e),
             }
         }

@@ -1,13 +1,13 @@
 //! A simple key/value store.
+#[macro_use]
+extern crate log;
 
-use failure::Error;
+pub mod error;
+mod kv;
+mod wal;
 
-#[macro_use] extern crate log;
+pub use error::Error;
+pub use kv::KvStore;
 
 /// Return type for KvStore operations.
 pub type Result<T> = std::result::Result<T, Error>;
-
-pub use kv::KvStore;
-
-mod kv;
-pub mod wal;

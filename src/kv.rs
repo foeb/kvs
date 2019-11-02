@@ -1,5 +1,5 @@
 use crate::wal::{Log, LogEntry};
-use crate::Result;
+use crate::{Error, Result};
 use std::fs::OpenOptions;
 use std::path::Path;
 
@@ -41,7 +41,6 @@ impl KvStore {
     ///
     /// If the key already exists, the previous value will be overwritten.
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        debug!("Pushing {}, {}", key, value);
         self.log.push(LogEntry::Set(key, value))
     }
 
@@ -49,12 +48,15 @@ impl KvStore {
     ///
     /// Returns `None` if the given key does not exist.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        debug!("Getting {}", key);
         Ok(self.log.get_value(&key)?)
     }
 
     /// Remove a given key.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        self.log.push(LogEntry::Rm(key))
+        if !self.log.contains_key(&key) {
+            Err(Error::NonExistentKey(key))
+        } else {
+            self.log.push(LogEntry::Rm(key))
+        }
     }
 }

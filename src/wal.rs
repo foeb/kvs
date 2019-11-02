@@ -8,7 +8,7 @@ use serde::{self, Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 
 use crate::Result;
 
@@ -76,6 +76,10 @@ impl Log {
         }
     }
 
+    pub fn contains_key(&mut self, key: &Key) -> bool {
+        self.index.contains_key(key)
+    }
+
     /// Append a log entry to the end of the log.
     pub fn push(&mut self, entry: LogEntry) -> Result<()> {
         let entry_str = ser::to_string(&entry)?;
@@ -88,20 +92,20 @@ impl Log {
     }
 
     /// Look up the given key in the log.
-    pub fn get_value(&mut self, key: &Key) -> io::Result<Option<Value>> {
+    pub fn get_value(&mut self, key: &Key) -> Result<Option<Value>> {
         if let Some(pos) = self.index.get(key) {
+            self.writer.flush()?; // make sure to flush the write buffer before trying to read.
             let offset = self.reader.seek(SeekFrom::Start(*pos))?;
             self.reader_pos = offset;
             let mut buf: String = String::with_capacity(READ_BUFFER_SIZE);
 
-            self.writer.flush()?; // make sure to flush the write buffer before trying to read.
             let len = self.reader.read_line(&mut buf)?;
             if len == 0 {
                 return Ok(None);
             }
 
             if let Some(line) = buf.get(0..len) {
-                if let LogEntry::Set(_, value) = de::from_str(line).expect("parse") {
+                if let LogEntry::Set(_, value) = de::from_str(line)? {
                     return Ok(Some(value));
                 }
             }
