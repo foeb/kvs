@@ -1,6 +1,6 @@
 use crate::wal::Key;
 
-use ron::{ser, de};
+use ron::{de, ser};
 
 use std::fmt;
 use std::io;
