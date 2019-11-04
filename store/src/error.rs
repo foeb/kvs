@@ -1,6 +1,5 @@
-use crate::wal::Key;
-
-use ron::{de, ser};
+use logformat;
+use logformat::mem::Key;
 
 use std::fmt;
 use std::io;
@@ -9,8 +8,7 @@ use std::io;
 pub enum Error {
     NonExistentKey(Key),
     IoError(io::Error),
-    SerError(ser::Error),
-    DeError(de::Error),
+    LogFormatError(logformat::Error),
 }
 
 impl fmt::Display for Error {
@@ -18,8 +16,7 @@ impl fmt::Display for Error {
         match self {
             Error::NonExistentKey(key) => write!(f, "Key not found: {}", key),
             Error::IoError(err) => fmt::Display::fmt(err, f),
-            Error::SerError(err) => fmt::Display::fmt(err, f),
-            Error::DeError(err) => fmt::Display::fmt(err, f),
+            Error::LogFormatError(err) => fmt::Display::fmt(err, f),
         }
     }
 }
@@ -30,14 +27,8 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<ser::Error> for Error {
-    fn from(error: ser::Error) -> Self {
-        Error::SerError(error)
-    }
-}
-
-impl From<de::Error> for Error {
-    fn from(error: de::Error) -> Self {
-        Error::DeError(error)
+impl From<logformat::Error> for Error {
+    fn from(error: logformat::Error) -> Self {
+        Error::LogFormatError(error)
     }
 }

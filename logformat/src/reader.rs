@@ -1,80 +1,53 @@
 use crate::entry::{file, mem};
 use crate::{Error, Result};
 use bincode;
-use std::io::{BufRead, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 
-pub struct LogReader<F: BufRead + Read + Seek> {
+#[derive(Debug)]
+pub struct LogReader<F: Read + Seek> {
     entry_reader: F,
     entry_pos: u64,
+    entry_buf: Vec<u8>,
     data_reader: F,
 }
 
-impl<F: BufRead + Read + Seek> LogReader<F> {
+impl<F: Read + Seek> LogReader<F> {
     pub fn new(entry_reader: F, data_reader: F) -> Result<Self> {
         let mut reader = LogReader {
             entry_reader,
             entry_pos: 0,
+            entry_buf: vec![0; file::SERIALIZED_ENTRY_SIZE],
             data_reader,
         };
-        reader.from_most_recent()?;
+        reader.seek(0)?;
         Ok(reader)
     }
 
-    fn fill_buf(&mut self) -> Result<&[u8]> {
+    fn fill_buf(&mut self) -> Result<()> {
         assert!(self.entry_reader.stream_position()? % file::SERIALIZED_ENTRY_SIZE as u64 == 0);
-        let buf = self.entry_reader.fill_buf()?;
-        if buf.len() < file::SERIALIZED_ENTRY_SIZE {
-            return Err(Error::BufferFillError());
+        if let Err(e) = self.entry_reader.read_exact(&mut self.entry_buf) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                Err(Error::UnexpectedEof)
+            } else {
+                Err(Error::IoError(e))
+            }
+        } else {
+            self.entry_pos += 1;
+            Ok(())
         }
-        Ok(buf)
     }
 
-    fn consume(&mut self) -> Result<()> {
-        if self.entry_pos >= file::MAX_ENTRIES_PER_FILE - 1 {
-            return Err(Error::SeekError());
-        }
-
-        self.entry_reader.consume(file::SERIALIZED_ENTRY_SIZE);
-        self.entry_pos += 1;
-
-        Ok(())
-    }
-
-    fn seek_prev(&mut self) -> Result<()> {
-        if self.entry_pos == 0 {
-            return Err(Error::SeekError());
-        }
-
-        let offset = self
+    pub fn seek(&mut self, pos: u64) -> Result<()> {
+        let actual_pos = self
             .entry_reader
-            .seek(SeekFrom::Current(-(file::SERIALIZED_ENTRY_SIZE as i64)))?;
-        self.entry_pos -= 1;
+            .seek(SeekFrom::Start(pos * file::SERIALIZED_ENTRY_SIZE as u64))?;
+        self.entry_pos = pos;
 
-        if offset % file::SERIALIZED_ENTRY_SIZE as u64 != 0 {
+        if actual_pos != pos * file::SERIALIZED_ENTRY_SIZE as u64 {
             return Err(Error::SeekError());
         }
 
         Ok(())
-    }
-
-    fn from_most_recent(&mut self) -> Result<()> {
-        let mut buf = self.fill_buf()?;
-        while bincode::deserialize::<Option<file::Entry>>(&buf)?.is_some() {
-            self.consume()?;
-            buf = self.fill_buf()?;
-        }
-        if self.entry_pos > 0 {
-            self.seek_prev()?;
-        }
-        Ok(())
-    }
-
-    pub fn last_entry(&mut self) -> Result<Option<file::Entry>> {
-        self.from_most_recent()?;
-        let buf = self.fill_buf()?;
-        let result = bincode::deserialize(&buf)?;
-        self.consume()?;
-        Ok(result)
     }
 
     fn lookup_value(&mut self, value: &file::Value) -> Result<mem::Value> {
@@ -91,7 +64,7 @@ impl<F: BufRead + Read + Seek> LogReader<F> {
         Ok(out)
     }
 
-    pub fn lookup_entry(&mut self, entry: &file::Entry) -> Result<mem::Entry> {
+    fn lookup_entry(&mut self, entry: &file::Entry) -> Result<mem::Entry> {
         let out = match entry {
             file::Entry::Set { key, value } => mem::Entry::Set {
                 key: self.lookup_value(key)?,
@@ -103,5 +76,29 @@ impl<F: BufRead + Read + Seek> LogReader<F> {
         };
 
         Ok(out)
+    }
+
+    pub fn read_entry(&mut self) -> Result<Option<mem::Entry>> {
+        if let Err(e) = self.fill_buf() {
+            return match e {
+                Error::UnexpectedEof => Ok(None),
+                _ => Err(e),
+            };
+        }
+
+        if let Some(entry) = bincode::deserialize::<Option<file::Entry>>(&self.entry_buf)? {
+            Ok(Some(self.lookup_entry(&entry)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn entry_at(&mut self, pos: u64) -> Result<Option<mem::Entry>> {
+        if pos > self.entry_pos {
+            return Ok(None);
+        }
+
+        self.seek(pos)?;
+        self.read_entry()
     }
 }

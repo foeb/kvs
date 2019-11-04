@@ -1,5 +1,6 @@
-use crate::wal::{Log, LogEntry};
+use crate::wal::Log;
 use crate::{Error, Result};
+use logformat::mem::{Entry, Value};
 use std::fs::OpenOptions;
 use std::path::Path;
 
@@ -23,40 +24,59 @@ pub struct KvStore {
 impl KvStore {
     /// Creates a `KvStore` by opening the given path as a log.
     pub fn open(path: &Path) -> Result<KvStore> {
-        let file_path = if path.is_dir() {
-            path.join("wal")
+        let log_path = if path.is_dir() {
+            path.join("log")
         } else {
             path.to_owned()
         };
-        let file = OpenOptions::new()
+
+        let data_path = log_path.with_extension("data");
+
+        let log_file = OpenOptions::new()
             .read(true)
             .append(true)
             .create(true)
-            .open(file_path)?;
-        let log = Log::new(file)?;
-        Ok(KvStore { log })
+            .open(log_path)?;
+
+        let data_file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(data_path)?;
+
+        Ok(KvStore {
+            log: Log::new(log_file, data_file)?,
+        })
     }
 
     /// Sets the value of a string key to a string.
     ///
     /// If the key already exists, the previous value will be overwritten.
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.log.push(LogEntry::Set(key, value))
+        self.log.push(Entry::Set {
+            key: Value::String(key),
+            value: Value::String(value),
+        })
     }
 
     /// Gets the string value of a given string key.
     ///
     /// Returns `None` if the given key does not exist.
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        Ok(self.log.get_value(&key)?)
+        if let Some(value) = self.log.get_value(&Value::String(key))? {
+            Ok(Some(format!("{}", value)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Remove a given key.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        if !self.log.contains_key(&key) {
-            Err(Error::NonExistentKey(key))
+        let key_ = Value::String(key);
+        if !self.log.contains_key(&key_) {
+            Err(Error::NonExistentKey(key_))
         } else {
-            self.log.push(LogEntry::Rm(key))
+            self.log.push(Entry::Remove { key: key_ })
         }
     }
 }

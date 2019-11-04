@@ -23,7 +23,7 @@ pub mod file {
 
     /// There's probably a better way to do it, but here we decide on a fixed size
     /// for our log entries.
-    pub const SERIALIZED_ENTRY_SIZE: usize = 32;
+    pub const SERIALIZED_ENTRY_SIZE: usize = 64;
 
     /// Here we pick an arbitrary size for when we should move onto another generation
     /// of log files.
@@ -40,14 +40,21 @@ pub mod file {
                 key: Value::Integer { value: 0 },
                 value: Value::Integer { value: 0 },
             });
-            assert!(bincode::serialized_size(&entry).unwrap() <= SERIALIZED_ENTRY_SIZE as u64);
+            let size = bincode::serialized_size(&entry).unwrap();
+            assert!(
+                size <= SERIALIZED_ENTRY_SIZE as u64,
+                "entry::file::Entry is too large: currently at {} bytes",
+                size
+            );
         }
     }
 }
 
 /// Datatypes for values deserialized from the log or data file.
 pub mod mem {
-    #[derive(Debug, PartialEq)]
+    use std::fmt;
+
+    #[derive(Debug, PartialEq, Eq, Hash)]
     pub enum Value {
         String(String),
         Integer(i128),
@@ -55,9 +62,27 @@ pub mod mem {
 
     pub type Key = Value;
 
-    #[derive(Debug, PartialEq)]
+    impl fmt::Display for Value {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            match self {
+                Value::String(s) => write!(f, "{}", s),
+                Value::Integer(i) => write!(f, "{}", i),
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq, Hash)]
     pub enum Entry {
         Set { key: Key, value: Value },
         Remove { key: Key },
+    }
+
+    impl Entry {
+        pub fn get_key(&self) -> Option<&Key> {
+            Some(match self {
+                Entry::Set { key, .. } => key,
+                Entry::Remove { key } => key,
+            })
+        }
     }
 }

@@ -19,7 +19,7 @@ pub enum Error {
     /// Reading/writing/seeking
     IoError(io::Error),
 
-    /// There's a lot of conversions from usize to u64, which technically might fail.
+    /// We need to convert usize to i64, which technically might fail.
     TryFromIntError(TryFromIntError),
 
     /// This is returned if we try to write to a full log file.
@@ -27,7 +27,7 @@ pub enum Error {
 
     /// We rely on the read/write buffers being filled to at least the size of
     /// a log entry. This is thrown if that doesn't happen.
-    BufferFillError(),
+    BufferFillError(usize),
 
     /// Similarly, if somehow we end up inbetween the start of two log entries we
     /// have to give up.
@@ -36,6 +36,8 @@ pub enum Error {
     /// We store UTF-8 strings as binary in the data files. This handles the case
     /// when we read something we weren't supposed to or the data is corrupted.
     FromUtf8Error(std::string::FromUtf8Error),
+
+    UnexpectedEof,
 }
 
 impl From<bincode::Error> for Error {

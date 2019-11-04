@@ -4,6 +4,7 @@ use bincode;
 use std::convert::TryInto;
 use std::io::{Seek, SeekFrom, Write};
 
+#[derive(Debug)]
 pub struct LogWriter<F: Write + Seek> {
     entry_writer: F,
     entry_pos: u64,
@@ -46,7 +47,7 @@ impl<F: Write + Seek> LogWriter<F> {
         Ok(out)
     }
 
-    pub fn write_entry(&mut self, entry: &mem::Entry) -> Result<()> {
+    pub fn write_entry(&mut self, entry: &mem::Entry) -> Result<u64> {
         if self.entry_pos >= file::MAX_ENTRIES_PER_FILE {
             return Err(Error::FileOutOfSpaceError());
         }
@@ -61,15 +62,18 @@ impl<F: Write + Seek> LogWriter<F> {
             },
         });
 
-        let bytes_written = self
-            .entry_writer
-            .write(bincode::serialize(&out)?.as_slice())?;
+        let mut bytes = bincode::serialize(&out)?;
+        // Pad the output to the max size of an entry
+        bytes.resize(file::SERIALIZED_ENTRY_SIZE, 0);
+
+        self.entry_writer.write_all(bytes.as_slice())?;
+        let pos = self.entry_pos;
         self.entry_pos += 1;
 
-        self.entry_writer.seek(SeekFrom::Current(
-            file::SERIALIZED_ENTRY_SIZE as i64 - bytes_written as i64,
+        self.entry_writer.seek(SeekFrom::Start(
+            self.entry_pos * file::SERIALIZED_ENTRY_SIZE as u64,
         ))?;
 
-        Ok(())
+        Ok(pos)
     }
 }
