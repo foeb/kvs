@@ -25,10 +25,6 @@ pub mod file {
     /// for our log entries.
     pub const SERIALIZED_ENTRY_SIZE: usize = 64;
 
-    /// Here we pick an arbitrary size for when we should move onto another generation
-    /// of log files.
-    pub const MAX_ENTRIES_PER_FILE: u64 = 0x1000;
-
     #[cfg(test)]
     mod tests {
         use super::*;

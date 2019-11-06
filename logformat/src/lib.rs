@@ -5,6 +5,9 @@
 //! it easy to compact in place. The data files currently are just unstructured
 //! blobs of bytes, but could be made smarter in the future.
 
+#[macro_use]
+extern crate log;
+
 mod entry;
 mod error;
 mod reader;

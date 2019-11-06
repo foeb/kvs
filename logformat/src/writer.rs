@@ -18,14 +18,31 @@ impl<F: Write + Seek> LogWriter<F> {
             entry_pos: 0,
             data_writer,
         };
-        writer.from_beginning()?;
+        writer.seek(0)?;
         Ok(writer)
     }
 
-    fn from_beginning(&mut self) -> Result<()> {
-        self.entry_writer.seek(SeekFrom::Start(0))?;
-        self.data_writer.seek(SeekFrom::Start(0))?;
+    pub fn seek(&mut self, pos: u64) -> Result<()> {
+        let actual_pos = self
+            .entry_writer
+            .seek(SeekFrom::Start(pos * file::SERIALIZED_ENTRY_SIZE as u64))?;
+        self.entry_pos = pos;
+
+        if actual_pos != pos * file::SERIALIZED_ENTRY_SIZE as u64 {
+            return Err(Error::SeekError());
+        }
+
         Ok(())
+    }
+
+    pub fn get_pos(&self) -> u64 {
+        trace!("Current pos: {}", self.entry_pos);
+        self.entry_pos
+    }
+
+    pub fn set_pos(&mut self, pos: u64) {
+        trace!("Setting pos to {}", pos);
+        self.entry_pos = pos;
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -47,12 +64,20 @@ impl<F: Write + Seek> LogWriter<F> {
         Ok(out)
     }
 
-    pub fn write_entry(&mut self, entry: &mem::Entry) -> Result<u64> {
-        if self.entry_pos >= file::MAX_ENTRIES_PER_FILE {
-            return Err(Error::FileOutOfSpaceError());
-        }
+    pub fn write_file_entry(&mut self, entry: &file::Entry) -> Result<u64> {
+        let mut bytes = bincode::serialize(&Some(entry))?;
+        // Pad the output to the max size of an entry
+        bytes.resize(file::SERIALIZED_ENTRY_SIZE, 0);
 
-        let out: Option<file::Entry> = Some(match entry {
+        self.entry_writer.write_all(bytes.as_slice())?;
+        let pos = self.get_pos();
+        self.set_pos(pos + 1);
+
+        Ok(pos)
+    }
+
+    pub fn write_entry(&mut self, entry: &mem::Entry) -> Result<u64> {
+        let out: file::Entry = match entry {
             mem::Entry::Set { key, value } => file::Entry::Set {
                 key: self.write_value(key)?,
                 value: self.write_value(value)?,
@@ -60,20 +85,37 @@ impl<F: Write + Seek> LogWriter<F> {
             mem::Entry::Remove { key } => file::Entry::Remove {
                 key: self.write_value(key)?,
             },
-        });
+        };
 
-        let mut bytes = bincode::serialize(&out)?;
-        // Pad the output to the max size of an entry
-        bytes.resize(file::SERIALIZED_ENTRY_SIZE, 0);
+        self.write_file_entry(&out)
+    }
+}
 
-        self.entry_writer.write_all(bytes.as_slice())?;
-        let pos = self.entry_pos;
-        self.entry_pos += 1;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
 
-        self.entry_writer.seek(SeekFrom::Start(
-            self.entry_pos * file::SERIALIZED_ENTRY_SIZE as u64,
-        ))?;
+    #[test]
+    fn entry_pos_remains_updated() {
+        let mut entry_buf = vec![0u8; 500];
+        let mut data_buf = vec![0u8; 500];
 
-        Ok(pos)
+        let entry_cursor = Cursor::new(&mut entry_buf);
+        let data_cursor = Cursor::new(&mut data_buf);
+
+        let mut writer = LogWriter::new(entry_cursor, data_cursor).expect("writer");
+        assert_eq!(0, writer.get_pos());
+
+        let entry = mem::Entry::Set {
+            key: mem::Value::Integer(42),
+            value: mem::Value::String("hey there".to_owned()),
+        };
+
+        for i in 0..10 {
+            let pos = writer.write_entry(&entry);
+            assert!(pos.is_ok());
+            assert_eq!(i, pos.unwrap());
+        }
     }
 }

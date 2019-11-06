@@ -4,7 +4,6 @@ extern crate log;
 
 pub mod error;
 mod kv;
-mod wal;
 
 pub use error::Error;
 pub use kv::KvStore;

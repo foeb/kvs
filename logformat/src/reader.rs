@@ -50,7 +50,7 @@ impl<F: Read + Seek> LogReader<F> {
         Ok(())
     }
 
-    fn lookup_value(&mut self, value: &file::Value) -> Result<mem::Value> {
+    pub fn lookup_file_value(&mut self, value: &file::Value) -> Result<mem::Value> {
         let out = match value {
             file::Value::String { start, len } => {
                 self.data_reader.seek(SeekFrom::Start(*start))?;
@@ -64,21 +64,21 @@ impl<F: Read + Seek> LogReader<F> {
         Ok(out)
     }
 
-    fn lookup_entry(&mut self, entry: &file::Entry) -> Result<mem::Entry> {
+    pub fn lookup_file_entry(&mut self, entry: &file::Entry) -> Result<mem::Entry> {
         let out = match entry {
             file::Entry::Set { key, value } => mem::Entry::Set {
-                key: self.lookup_value(key)?,
-                value: self.lookup_value(value)?,
+                key: self.lookup_file_value(key)?,
+                value: self.lookup_file_value(value)?,
             },
             file::Entry::Remove { key } => mem::Entry::Remove {
-                key: self.lookup_value(key)?,
+                key: self.lookup_file_value(key)?,
             },
         };
 
         Ok(out)
     }
 
-    pub fn read_entry(&mut self) -> Result<Option<mem::Entry>> {
+    pub fn read_file_entry(&mut self) -> Result<Option<file::Entry>> {
         if let Err(e) = self.fill_buf() {
             return match e {
                 Error::UnexpectedEof => Ok(None),
@@ -86,8 +86,12 @@ impl<F: Read + Seek> LogReader<F> {
             };
         }
 
-        if let Some(entry) = bincode::deserialize::<Option<file::Entry>>(&self.entry_buf)? {
-            Ok(Some(self.lookup_entry(&entry)?))
+        Ok(bincode::deserialize::<Option<file::Entry>>(&self.entry_buf)?)
+    }
+
+    pub fn read_entry(&mut self) -> Result<Option<mem::Entry>> {
+        if let Some(entry) = self.read_file_entry()? {
+            Ok(Some(self.lookup_file_entry(&entry)?))
         } else {
             Ok(None)
         }
