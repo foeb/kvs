@@ -86,7 +86,9 @@ impl<F: Read + Seek> LogReader<F> {
             };
         }
 
-        Ok(bincode::deserialize::<Option<file::Entry>>(&self.entry_buf)?)
+        Ok(bincode::deserialize::<Option<file::Entry>>(
+            &self.entry_buf,
+        )?)
     }
 
     pub fn read_entry(&mut self) -> Result<Option<mem::Entry>> {

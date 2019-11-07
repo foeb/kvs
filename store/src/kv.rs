@@ -1,7 +1,7 @@
 use crate::{Error, Result};
 use logformat::{file, mem, LogReader, LogWriter};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
@@ -11,13 +11,26 @@ pub trait KvsEngine {
     fn remove(&mut self, key: String) -> Result<()>;
 }
 
-type Generation = u32;
-
 pub struct KvStore {
     log_path: PathBuf,
+    log_len: HashMap<Generation, u64>,
     readers: HashMap<Generation, LogReader<BufReader<File>>>,
     writers: HashMap<Generation, LogWriter<BufWriter<File>>>,
-    index: HashMap<mem::Key, u64>,
+    current_gen: Generation,
+    index: HashMap<mem::Key, IndexEntry>,
+}
+
+type Generation = u32;
+
+struct IndexEntry {
+    pub gen: Generation,
+    pub location: u64,
+}
+
+impl IndexEntry {
+    pub fn new(gen: Generation, location: u64) -> Self {
+        IndexEntry { gen, location }
+    }
 }
 
 impl KvsEngine for KvStore {
@@ -30,8 +43,8 @@ impl KvsEngine for KvStore {
             key: mem::Value::String(key),
             value: mem::Value::String(value),
         };
-        let pos = self.push(&entry)?;
-        self.index_entry(entry, pos);
+        let current_gen = self.current_gen;
+        self.push(&current_gen, entry)?;
         Ok(())
     }
 
@@ -41,20 +54,22 @@ impl KvsEngine for KvStore {
     fn get(&mut self, key: String) -> Result<Option<String>> {
         trace!("Getting {}", &key);
         let key_ = mem::Value::String(key);
-        let gen = 0;
-        self.flush(gen)?;
-        let reader = self
-            .readers
-            .get_mut(&gen)
-            .expect("Reader not found for generation");
-        if let Some(pos) = self.index.get(&key_) {
-            let entry = reader.entry_at(*pos)?;
+        let current_gen = self.current_gen;
+        self.flush(&current_gen)?;
+
+        if let Some(IndexEntry { gen, location }) = self.index.get(&key_) {
+            let reader = self
+                .readers
+                .get_mut(&gen)
+                .expect("Reader not found for generation");
+
+            let entry = reader.entry_at(*location)?;
             if let Some(mem::Entry::Set { value, .. }) = &entry {
                 return Ok(Some(format!("{}", value)));
             } else {
                 warn!(
-                    "Did not find Entry::Set at {}, instead found {:?}",
-                    *pos, &entry
+                    "Did not find Entry::Set at ({}, {}), instead found {:?}",
+                    *gen, *location, &entry
                 );
             }
         } else {
@@ -64,7 +79,7 @@ impl KvsEngine for KvStore {
         Ok(None)
     }
 
-    /// Remove a key from the database.
+    /// Remove a given key.
     fn remove(&mut self, key: String) -> Result<()> {
         trace!("Removing {}", &key);
         let key_ = mem::Value::String(key);
@@ -73,8 +88,8 @@ impl KvsEngine for KvStore {
             Err(Error::NonExistentKey(key_))
         } else {
             let entry = mem::Entry::Remove { key: key_ };
-            let pos = self.push(&entry)?;
-            self.index_entry(entry, pos);
+            let current_gen = self.current_gen;
+            self.push(&current_gen, entry)?;
             Ok(())
         }
     }
@@ -85,7 +100,6 @@ const DEFAULT_INDEX_CAPACITY: usize = 4000;
 
 impl Drop for KvStore {
     fn drop(&mut self) {
-        self.compact(0).unwrap();
         for (_, writer) in self.writers.iter_mut() {
             if let Err(e) = writer.flush() {
                 error!("ERROR FLUSHING LOG TO DISK {:?}", e);
@@ -94,32 +108,61 @@ impl Drop for KvStore {
     }
 }
 
+const COMPACT_THRESHOLD: u64 = 4000;
+
 impl KvStore {
     /// Creates a `KvStore` by opening the given path as a log.
     pub fn open(path: &Path) -> Result<KvStore> {
-        let log_path = if path.is_dir() {
-            path.join("log")
-        } else {
-            path.to_owned()
-        };
+        let log_path = path.to_owned();
+
+        if !log_path.is_dir() {
+            return Err(Error::Message("Path is not a directory".to_owned()));
+        }
 
         trace!("Opening KvStore at {:?}", &log_path);
 
+        let generations = fs::read_dir(&log_path)?
+            .map(|e| {
+                e.map(|x| {
+                    x.file_name()
+                        .as_os_str()
+                        .to_str()
+                        .expect("file name is utf-8")
+                        .parse::<Generation>()
+                })
+            })
+            .filter_map(|x| if let Ok(Ok(gen)) = x { Some(gen) } else { None });
+
         let mut kvs = KvStore {
             log_path,
+            log_len: HashMap::new(),
             readers: HashMap::new(),
             writers: HashMap::new(),
+            current_gen: generations.max().unwrap_or(0),
             index: HashMap::with_capacity(DEFAULT_INDEX_CAPACITY),
         };
-        kvs.open_log_file(0)?;
-        kvs.compact(0)?;
-        kvs.load(0)?;
+
+        trace!("Current generation {}", &kvs.current_gen);
+
+        for gen in 0..kvs.current_gen + 1 {
+            kvs.open_log_file(gen)?;
+            let len = kvs.load(gen)?;
+            debug!("Loaded gen {} with {} entries", gen, len);
+        }
+
         Ok(kvs)
     }
 
-    fn open_log_file(&mut self, gen: Generation) -> Result<()> {
-        let log_path = self.log_path.with_extension(format!("{}", gen));
-        let data_path = self.log_path.with_extension(format!("{}.data", gen));
+    fn get_log_path(&self, gen: Generation, is_data: bool, is_temp: bool) -> PathBuf {
+        let temp_part = if is_temp { "-temp" } else { "" };
+        let data_part = if is_data { ".data" } else { "" };
+        let name = format!("{}{}{}", gen, temp_part, data_part);
+        self.log_path.join(Path::new(name.as_str()))
+    }
+
+    fn open_temp_writer(&self, gen: Generation) -> Result<LogWriter<BufWriter<File>>> {
+        let log_path = self.get_log_path(gen, false, true);
+        let data_path = self.get_log_path(gen, true, true);
 
         let log_file = OpenOptions::new()
             .read(true)
@@ -133,13 +176,29 @@ impl KvStore {
             .create(true)
             .open(&data_path)?;
 
-        self.writers.insert(
-            gen,
-            LogWriter::new(
-                BufWriter::new(log_file.try_clone()?),
-                BufWriter::new(data_file.try_clone()?),
-            )?,
-        );
+        let writer = LogWriter::new(
+            BufWriter::new(log_file.try_clone()?),
+            BufWriter::new(data_file.try_clone()?),
+        )?;
+
+        Ok(writer)
+    }
+
+    fn open_log_file(&mut self, gen: Generation) -> Result<()> {
+        let log_path = self.get_log_path(gen, false, false);
+        let data_path = self.get_log_path(gen, true, false);
+
+        let log_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&log_path)?;
+
+        let data_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&data_path)?;
 
         self.readers.insert(
             gen,
@@ -149,15 +208,27 @@ impl KvStore {
             )?,
         );
 
+        let old_writer = self.writers.insert(
+            gen,
+            LogWriter::new(
+                BufWriter::new(log_file.try_clone()?),
+                BufWriter::new(data_file.try_clone()?),
+            )?,
+        );
+
+        if let Some(mut writer) = old_writer {
+            writer.flush()?;
+        }
+
         Ok(())
     }
 
     /// Put the entry into the index with the given position in the log file.
-    fn index_entry(&mut self, entry: mem::Entry, pos: u64) {
-        trace!("Indexing entry {:?} at {}", &entry, pos);
+    fn index_entry(&mut self, entry: mem::Entry, gen: Generation, pos: u64) {
+        debug!("Indexing entry {:?} at gen {}, {}", &entry, gen, pos);
         match entry {
             mem::Entry::Set { key, .. } => {
-                self.index.insert(key, pos);
+                self.index.insert(key, IndexEntry::new(gen, pos));
             }
             mem::Entry::Remove { key } => {
                 self.index.remove(&key);
@@ -165,10 +236,10 @@ impl KvStore {
         }
     }
 
-    fn flush(&mut self, gen: Generation) -> Result<()> {
+    fn flush(&mut self, gen: &Generation) -> Result<()> {
         let writer = self
             .writers
-            .get_mut(&gen)
+            .get_mut(gen)
             .expect("Writer not found for generation");
         writer.flush()?;
         trace!("Flushed writer for gen {}", gen);
@@ -176,19 +247,27 @@ impl KvStore {
     }
 
     /// Append a log entry to the end of the log.
-    fn push(&mut self, entry: &mem::Entry) -> Result<u64> {
-        trace!("Pushing entry {:?}", entry);
+    fn push(&mut self, gen: &Generation, entry: mem::Entry) -> Result<u64> {
+        debug!("Pushing entry {:?}", entry);
         let writer = self
             .writers
-            .get_mut(&0)
+            .get_mut(&gen)
             .expect("Writer not found for generation");
-        Ok(writer.write_entry(entry)?)
+
+        let pos = writer.write_entry(&entry)?;
+        self.index_entry(entry, *gen, pos);
+
+        if pos > COMPACT_THRESHOLD {
+            self.compact_all()?;
+        }
+
+        Ok(pos)
     }
 
     /// Load the log from disk.
-    fn load(&mut self, gen: Generation) -> Result<()> {
+    fn load(&mut self, gen: Generation) -> Result<u64> {
         trace!("Loading log from disk for gen {}", gen);
-        self.flush(gen)?;
+        self.flush(&gen)?;
         let reader = self
             .readers
             .get_mut(&gen)
@@ -204,8 +283,10 @@ impl KvStore {
         }
 
         for (entry, pos) in entries {
-            self.index_entry(entry, pos);
+            self.index_entry(entry, gen, pos);
         }
+
+        self.log_len.insert(gen, pos);
 
         let writer = self
             .writers
@@ -213,25 +294,32 @@ impl KvStore {
             .expect("Reader not found for generation");
         writer.set_pos(pos);
 
+        Ok(pos)
+    }
+
+    fn compact_all(&mut self) -> Result<()> {
+        let mut new_len = 0;
+        for gen in 0..self.current_gen + 1 {
+            new_len = self.compact(gen)?;
+        }
+
+        if new_len > COMPACT_THRESHOLD {
+            self.current_gen += 1;
+            self.open_log_file(self.current_gen)?;
+        };
+
         Ok(())
     }
 
-    fn compact(&mut self, gen: Generation) -> Result<()> {
-        assert!(gen % 2 == 0);
+    fn compact(&mut self, gen: Generation) -> Result<u64> {
+        let mut writer = self.open_temp_writer(gen)?;
 
-        self.open_log_file(gen + 1)?;
-
-        self.flush(gen)?;
+        self.flush(&gen)?;
         let reader = self
             .readers
             .get_mut(&gen)
             .expect("Reader not found for generation");
         reader.seek(0)?;
-
-        let writer = self
-            .writers
-            .get_mut(&(gen + 1))
-            .expect("Writer not found for generation");
 
         trace!("Starting compaction");
 
@@ -242,20 +330,23 @@ impl KvStore {
             match &entry {
                 file::Entry::Set { key, value } => {
                     let mem_key = reader.lookup_file_value(&key)?;
-                    if let Some(pos) = self.index.get(&mem_key) {
+                    if let Some(index_entry) = self.index.get(&mem_key) {
                         trace!(
-                            "Found pos in index: {}, comparing to reader_pos {}",
-                            pos,
-                            reader_pos
+                            "Found location in index for gen {}: {}, comparing to reader_pos {} in gen {}",
+                            index_entry.gen,
+                            index_entry.location,
+                            reader_pos,
+                            gen,
                         );
 
-                        if *pos == reader_pos {
+                        if index_entry.gen == gen && index_entry.location == reader_pos {
                             let mem_value = reader.lookup_file_value(&value)?;
                             writer.write_entry(&mem::Entry::Set {
                                 key: mem_key,
                                 value: mem_value,
                             })?;
                         } else {
+                            debug!("Deleting Entry::Set at gen {}, {}", gen, reader_pos);
                             entries_deleted += 1;
                         }
                     }
@@ -265,6 +356,7 @@ impl KvStore {
                     if !self.index.contains_key(&mem_key) {
                         writer.write_entry(&mem::Entry::Remove { key: mem_key })?;
                     } else {
+                        debug!("Deleting Entry::Remove at gen {}, {}", gen, reader_pos);
                         entries_deleted += 1;
                     }
                 }
@@ -272,27 +364,25 @@ impl KvStore {
             reader_pos += 1;
         }
 
-        info!("Replacing {:?} with {:?}",
-            self.log_path.with_extension(format!("{}", gen)),
-            self.log_path.with_extension(format!("{}", gen + 1)),
-        );
+        writer.flush()?;
 
         std::fs::rename(
-            self.log_path.with_extension(format!("{}", gen + 1)),
-            self.log_path.with_extension(format!("{}", gen)),
+            self.get_log_path(gen, false, true),
+            self.get_log_path(gen, false, false),
         )?;
 
         std::fs::rename(
-            self.log_path.with_extension(format!("{}.data", gen + 1)),
-            self.log_path.with_extension(format!("{}.data", gen)),
+            self.get_log_path(gen, true, true),
+            self.get_log_path(gen, true, false),
         )?;
+
+        self.open_log_file(gen)?;
 
         info!(
             "Finished compaction: removed {} out of {} entries",
-            entries_deleted,
-            reader_pos
+            entries_deleted, reader_pos
         );
 
-        Ok(())
+        Ok(reader_pos)
     }
 }
