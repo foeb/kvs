@@ -5,6 +5,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
+pub trait KvsEngine {
+    fn set(&mut self, key: String, value: String) -> Result<()>;
+    fn get(&mut self, key: String) -> Result<Option<String>>;
+    fn remove(&mut self, key: String) -> Result<()>;
+}
+
 type Generation = u32;
 
 pub struct KvStore {
@@ -12,6 +18,66 @@ pub struct KvStore {
     readers: HashMap<Generation, LogReader<BufReader<File>>>,
     writers: HashMap<Generation, LogWriter<BufWriter<File>>>,
     index: HashMap<mem::Key, u64>,
+}
+
+impl KvsEngine for KvStore {
+    /// Sets the value of a string key to a string.
+    ///
+    /// If the key already exists, the previous value will be overwritten.
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        trace!("Setting {} <- {}", &key, &value);
+        let entry = mem::Entry::Set {
+            key: mem::Value::String(key),
+            value: mem::Value::String(value),
+        };
+        let pos = self.push(&entry)?;
+        self.index_entry(entry, pos);
+        Ok(())
+    }
+
+    /// Gets the string value of a given string key.
+    ///
+    /// Returns `None` if the given key does not exist.
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        trace!("Getting {}", &key);
+        let key_ = mem::Value::String(key);
+        let gen = 0;
+        self.flush(gen)?;
+        let reader = self
+            .readers
+            .get_mut(&gen)
+            .expect("Reader not found for generation");
+        if let Some(pos) = self.index.get(&key_) {
+            let entry = reader.entry_at(*pos)?;
+            if let Some(mem::Entry::Set { value, .. }) = &entry {
+                return Ok(Some(format!("{}", value)));
+            } else {
+                warn!(
+                    "Did not find Entry::Set at {}, instead found {:?}",
+                    *pos, &entry
+                );
+            }
+        } else {
+            warn!("Key not found in index: {:?}", &key_);
+        }
+
+        Ok(None)
+    }
+
+    /// Remove a key from the database.
+    fn remove(&mut self, key: String) -> Result<()> {
+        trace!("Removing {}", &key);
+        let key_ = mem::Value::String(key);
+        if !self.index.contains_key(&key_) {
+            warn!("Trying to remove key not found in index: {}", &key_);
+            Err(Error::NonExistentKey(key_))
+        } else {
+            let entry = mem::Entry::Remove { key: key_ };
+            let pos = self.push(&entry)?;
+            self.index_entry(entry, pos);
+            Ok(())
+        }
+    }
 }
 
 /// The default capacity of the index (to reduce allocations).
@@ -84,64 +150,6 @@ impl KvStore {
         );
 
         Ok(())
-    }
-
-    /// Sets the value of a string key to a string.
-    ///
-    /// If the key already exists, the previous value will be overwritten.
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        trace!("Setting {} <- {}", &key, &value);
-        let entry = mem::Entry::Set {
-            key: mem::Value::String(key),
-            value: mem::Value::String(value),
-        };
-        let pos = self.push(&entry)?;
-        self.index_entry(entry, pos);
-        Ok(())
-    }
-
-    /// Gets the string value of a given string key.
-    ///
-    /// Returns `None` if the given key does not exist.
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        trace!("Getting {}", &key);
-        let key_ = mem::Value::String(key);
-        let gen = 0;
-        self.flush(gen)?;
-        let reader = self
-            .readers
-            .get_mut(&gen)
-            .expect("Reader not found for generation");
-        if let Some(pos) = self.index.get(&key_) {
-            let entry = reader.entry_at(*pos)?;
-            if let Some(mem::Entry::Set { value, .. }) = &entry {
-                return Ok(Some(format!("{}", value)));
-            } else {
-                warn!(
-                    "Did not find Entry::Set at {}, instead found {:?}",
-                    *pos, &entry
-                );
-            }
-        } else {
-            warn!("Key not found in index: {:?}", &key_);
-        }
-
-        Ok(None)
-    }
-
-    /// Remove a given key.
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        trace!("Removing {}", &key);
-        let key_ = mem::Value::String(key);
-        if !self.index.contains_key(&key_) {
-            warn!("Trying to remove key not found in index: {}", &key_);
-            Err(Error::NonExistentKey(key_))
-        } else {
-            let entry = mem::Entry::Remove { key: key_ };
-            let pos = self.push(&entry)?;
-            self.index_entry(entry, pos);
-            Ok(())
-        }
     }
 
     /// Put the entry into the index with the given position in the log file.

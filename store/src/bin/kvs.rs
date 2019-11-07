@@ -1,7 +1,7 @@
 use clap::{App, AppSettings, Arg, SubCommand};
 use env_logger;
 
-use store::{Error, KvStore, Result};
+use store::{Error, KvStore, Result, KvsEngine};
 
 use std::env::current_dir;
 use std::process::exit;
