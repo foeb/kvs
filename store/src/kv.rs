@@ -13,7 +13,6 @@ pub trait KvsEngine {
 
 pub struct KvStore {
     log_path: PathBuf,
-    log_len: HashMap<Generation, u64>,
     readers: HashMap<Generation, LogReader<BufReader<File>>>,
     writers: HashMap<Generation, LogWriter<BufWriter<File>>>,
     current_gen: Generation,
@@ -135,7 +134,6 @@ impl KvStore {
 
         let mut kvs = KvStore {
             log_path,
-            log_len: HashMap::new(),
             readers: HashMap::new(),
             writers: HashMap::new(),
             current_gen: generations.max().unwrap_or(0),
@@ -285,8 +283,6 @@ impl KvStore {
         for (entry, pos) in entries {
             self.index_entry(entry, gen, pos);
         }
-
-        self.log_len.insert(gen, pos);
 
         let writer = self
             .writers
