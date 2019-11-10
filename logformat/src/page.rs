@@ -1,4 +1,6 @@
 use crate::Result;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::v1::{ClockSequence, Timestamp};
 use uuid::Uuid;
@@ -36,10 +38,10 @@ pub const MAGIC: u64 = 0x78736769;
 
 pub const RESERVE_BYTES_FOR_HEADER: usize = 384;
 
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
 pub struct PageHeader {
     pub uuid: Uuid,
-    pub timestamp: Timestamp,
+    pub ticks: u64,
     pub min_key_hash: u64,
     pub max_key_hash: u64,
 }
@@ -48,7 +50,7 @@ impl Default for PageHeader {
     fn default() -> Self {
         PageHeader {
             uuid: Uuid::default(),
-            timestamp: Timestamp::from_rfc4122(0, 0),
+            ticks: 0,
             min_key_hash: 0,
             max_key_hash: 0,
         }
@@ -69,10 +71,14 @@ impl PageHeader {
         let uuid = Uuid::new_v1(timestamp, node_id)?;
         Ok(PageHeader {
             uuid,
-            timestamp,
+            ticks: timestamp.to_rfc4122().0,
             min_key_hash,
             max_key_hash,
         })
+    }
+
+    pub fn path(&self) -> PathBuf {
+        Path::new(format!("{}.log", self.uuid.to_hyphenated_ref()).as_str()).to_owned()
     }
 }
 
@@ -120,10 +126,8 @@ impl<'a> PageBuffer<'a> {
         // UUID
         write_bytes!(self.buf, index, header.uuid.as_bytes());
 
-        // Timestamp
-        let (ticks, counter) = header.timestamp.to_rfc4122();
-        write_int!(self.buf, index, ticks);
-        write_int!(self.buf, index, counter);
+        // Ticks
+        write_int!(self.buf, index, header.ticks);
 
         // Min/max key hashes
         write_int!(self.buf, index, header.min_key_hash);
@@ -158,7 +162,6 @@ impl<'a> PageBuffer<'a> {
 
         let mut u128_buf = [0u8; 16];
         let mut u64_buf = [0u8; 8];
-        let mut u16_buf = [0u8; 2];
 
         // Magic number
         for i in 0..8 {
@@ -180,13 +183,7 @@ impl<'a> PageBuffer<'a> {
         }
         index += 8;
         let ticks = u64::from_le_bytes(u64_buf);
-
-        for i in 0..2 {
-            u16_buf[i] = self.buf[i + index];
-        }
-        index += 2;
-        let counter = u16::from_le_bytes(u16_buf);
-        header.timestamp = Timestamp::from_rfc4122(ticks, counter);
+        header.ticks = ticks;
 
         // Min/max key hashes
         for i in 0..8 {

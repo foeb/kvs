@@ -14,6 +14,8 @@ mod reader;
 mod writer;
 
 pub mod page;
+pub mod slotted;
+pub mod index;
 
 pub use entry::{file, mem};
 pub use error::{Error, Result};
