@@ -13,6 +13,8 @@ mod error;
 mod reader;
 mod writer;
 
+pub mod page;
+
 pub use entry::{file, mem};
 pub use error::{Error, Result};
 pub use reader::LogReader;

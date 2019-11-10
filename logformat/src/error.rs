@@ -3,6 +3,8 @@ use serde::{de, ser};
 use std::fmt;
 use std::io;
 use std::num::TryFromIntError;
+use uuid;
+use std::time::SystemTimeError;
 
 /// The result type for everything in the logformat crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -37,7 +39,21 @@ pub enum Error {
     /// when we read something we weren't supposed to or the data is corrupted.
     FromUtf8Error(std::string::FromUtf8Error),
 
+    UuidError(uuid::Error),
+    SystemTimeError(SystemTimeError),
     UnexpectedEof,
+}
+
+impl From<uuid::Error> for Error {
+    fn from(error: uuid::Error) -> Self {
+        Error::UuidError(error)
+    }
+}
+
+impl From<SystemTimeError> for Error {
+    fn from(error: SystemTimeError) -> Self {
+        Error::SystemTimeError(error)
+    }
 }
 
 impl From<bincode::Error> for Error {
