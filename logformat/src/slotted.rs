@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Slotted is our data file type. We keep a list of (pointer, length) pairs at the beginning,
+/// followed by the heap of data as bytes.
 #[derive(Default, Serialize, Deserialize)]
 pub struct Slotted {
     header: SlottedHeader,

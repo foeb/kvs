@@ -2,6 +2,7 @@ use crate::page::PageHeader;
 use serde::{Serialize, Deserialize};
 use std::path::{Path, PathBuf};
 
+// FIXME: make this into a B-tree (or something like it) with pages as leaves
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Index {
     headers: Vec<PageHeader>,

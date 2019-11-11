@@ -22,6 +22,9 @@ pub const MAGIC: u64 = 0x7873_6769;
 
 pub const RESERVE_BYTES_FOR_HEADER: usize = 384;
 
+/// Each entry is 10 bytes (a u64 + u16)
+pub const COMMANDS_PER_PAGE: usize = 1600;
+
 #[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
 pub struct PageHeader {
     pub uuid: Uuid,
@@ -70,8 +73,6 @@ impl PageHeader {
     }
 }
 
-pub const COMMANDS_PER_PAGE: usize = 1600;
-
 pub struct PageBody {
     pub key_hash: [u64; COMMANDS_PER_PAGE],
     pub value_index: [i16; COMMANDS_PER_PAGE],
@@ -86,8 +87,10 @@ impl Default for PageBody {
     }
 }
 
+/// Each page is 16KiB.
 pub const BUF_SIZE: usize = 16384;
 
+/// PageBuffer is used to quickly read and write pages to disk in one go.
 pub struct PageBuffer {
     pub buf: [u8; BUF_SIZE],
 }

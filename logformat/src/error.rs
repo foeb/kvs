@@ -7,7 +7,6 @@ use std::time::SystemTimeError;
 /// The result type for everything in the logformat crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The error type for everything in the logformat crate.
 #[derive(Debug)]
 pub enum Error {
     Message(String),

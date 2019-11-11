@@ -4,7 +4,7 @@ use logformat::index::Index;
 use logformat::page::{Page, PageBody, PageBuffer, PageHeader, BUF_SIZE, COMMANDS_PER_PAGE};
 use logformat::slotted::Slotted;
 use metrohash::MetroHash64;
-use std::cmp;
+use std::cmp::{self, Ordering};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
@@ -23,10 +23,38 @@ pub struct KvStore {
     index: Index,
     page_readers: HashMap<Uuid, BufReader<File>>,
     data_readers: HashMap<Uuid, BufReader<File>>,
-    in_memory: BTreeMap<String, Option<String>>,
+    in_memory: BTreeMap<InMemoryKey, Option<String>>,
     page_buffer: PageBuffer,
     node_id: [u8; 6],
     context: v1::Context,
+}
+
+/// Holds the key with its hash, ordered by the hash.
+#[derive(Eq, PartialEq)]
+pub struct InMemoryKey{pub hash: u64, pub key: String}
+
+impl InMemoryKey {
+    pub fn new(key: String) -> Self {
+        let mut hasher = MetroHash64::with_seed(METROHASH_SEED);
+        key.hash(&mut hasher);
+        let hash = hasher.finish();
+        InMemoryKey {
+            key,
+            hash,
+        }
+    }
+}
+
+impl Ord for InMemoryKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.hash.cmp(&other.hash)
+    }
+}
+
+impl PartialOrd for InMemoryKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 const METROHASH_SEED: u64 = 0x385f_829f_0031_3111;
@@ -45,7 +73,8 @@ impl KvsEngine for KvStore {
     /// Returns `None` if the given key does not exist.
     fn get(&mut self, key: String) -> Result<Option<String>> {
         trace!("Getting {}", &key);
-        if let Some(maybe_value) = self.in_memory.get(&key) {
+        let key_with_hash = InMemoryKey::new(key);
+        if let Some(maybe_value) = self.in_memory.get(&key_with_hash) {
             if let Some(value) = maybe_value {
                 debug!("Found {} in memory", value);
                 return Ok(Some(value.to_string()));
@@ -55,10 +84,7 @@ impl KvsEngine for KvStore {
             }
         }
 
-        let mut hasher = MetroHash64::with_seed(METROHASH_SEED);
-        key.hash(&mut hasher);
-        let key_hash = hasher.finish();
-
+        let key_hash = key_with_hash.hash;
         let len = self.index.len();
         for i in 0..len {
             let header = self.index.get(len - i - 1).unwrap();
@@ -109,7 +135,7 @@ impl Drop for KvStore {
 }
 
 impl KvStore {
-    /// Creates a `KvStore` by opening the given path as a log.
+    /// Creates a `KvStore` by opening all of the log files in the given path.
     pub fn open(path: &Path) -> Result<KvStore> {
         let log_path = path.to_owned();
 
@@ -135,6 +161,8 @@ impl KvStore {
         Ok(kvs)
     }
 
+    /// Write the index to the index file, truncating the previous one.
+    // FIXME: this could cause us to lose all of the data
     fn write_index(&self) -> Result<()> {
         let path = self.log_path.join(Index::path());
         let file = OpenOptions::new()
@@ -147,6 +175,7 @@ impl KvStore {
         Ok(())
     }
 
+    /// Read the index from the index file.
     fn read_index(&mut self) -> Result<()> {
         let path = self.log_path.join(Index::path());
         trace!("Reading index at {:?}", &path);
@@ -168,6 +197,8 @@ impl KvStore {
         }
     }
 
+    /// Take the in-memory store, and write it out as a page in order of key-hash, along with
+    /// the data file.
     fn write_page(&mut self) -> Result<()> {
         let mut min = std::u64::MAX;
         let mut max = std::u64::MIN;
@@ -180,14 +211,10 @@ impl KvStore {
                 panic!("Writing page with more than COMMANDS_PER_PAGE commands");
             }
 
-            let mut hasher = MetroHash64::with_seed(METROHASH_SEED);
-            key.hash(&mut hasher);
-            let key_hash = hasher.finish();
-
-            min = cmp::min(min, key_hash);
-            max = cmp::max(max, key_hash);
+            min = cmp::min(min, key.hash);
+            max = cmp::max(max, key.hash);
             let value_index = value.as_ref().map(|s| data.push(s.as_bytes()) as i16);
-            body.key_hash[i] = key_hash;
+            body.key_hash[i] = key.hash;
             body.value_index[i] = value_index.unwrap_or(-1);
 
             i += 1;
@@ -218,6 +245,7 @@ impl KvStore {
         Ok(())
     }
 
+    /// Read the page with the UUID from disk.
     fn read_page(&mut self, uuid: &Uuid) -> Result<Page> {
         if !self.page_readers.contains_key(&uuid) {
             let path = self.log_path.join(Page::path(uuid));
@@ -236,6 +264,7 @@ impl KvStore {
         }
     }
 
+    /// Read the data file with the UUID from disk.
     fn read_data(&mut self, uuid: &Uuid) -> Result<Slotted> {
         if !self.data_readers.contains_key(&uuid) {
             let path = self.log_path.join(Slotted::path(uuid));
@@ -255,7 +284,7 @@ impl KvStore {
     /// Append a log entry to the end of the log.
     fn push(&mut self, key: String, value: Option<String>) -> Result<()> {
         debug!("Pushing ({:?}, {:?})", &key, &value);
-        self.in_memory.insert(key, value);
+        self.in_memory.insert(InMemoryKey::new(key), value);
         if self.in_memory.len() >= COMMANDS_PER_PAGE {
             self.write_page()?;
             self.in_memory = BTreeMap::new();
