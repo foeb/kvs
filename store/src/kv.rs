@@ -4,6 +4,7 @@ use logformat::index::Index;
 use logformat::page::{Page, PageBody, PageBuffer, PageHeader, BUF_SIZE, COMMANDS_PER_PAGE};
 use logformat::slotted::Slotted;
 use metrohash::MetroHash64;
+use slog::Logger;
 use std::cmp::{self, Ordering};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
@@ -27,21 +28,22 @@ pub struct KvStore {
     page_buffer: PageBuffer,
     node_id: [u8; 6],
     context: v1::Context,
+    slog: Logger,
 }
 
 /// Holds the key with its hash, ordered by the hash.
 #[derive(Eq, PartialEq)]
-pub struct InMemoryKey{pub hash: u64, pub key: String}
+pub struct InMemoryKey {
+    pub hash: u64,
+    pub key: String,
+}
 
 impl InMemoryKey {
     pub fn new(key: String) -> Self {
         let mut hasher = MetroHash64::with_seed(METROHASH_SEED);
         key.hash(&mut hasher);
         let hash = hasher.finish();
-        InMemoryKey {
-            key,
-            hash,
-        }
+        InMemoryKey { key, hash }
     }
 }
 
@@ -72,14 +74,14 @@ impl KvsEngine for KvStore {
     ///
     /// Returns `None` if the given key does not exist.
     fn get(&mut self, key: String) -> Result<Option<String>> {
-        trace!("Getting {}", &key);
+        trace!(self.slog, "Getting {}", &key);
         let key_with_hash = InMemoryKey::new(key);
         if let Some(maybe_value) = self.in_memory.get(&key_with_hash) {
             if let Some(value) = maybe_value {
-                debug!("Found {} in memory", value);
+                trace!(self.slog, "Found {} in memory", value);
                 return Ok(Some(value.to_string()));
             } else {
-                debug!("Found None in memory");
+                trace!(self.slog, "Found None in memory");
                 return Ok(None);
             }
         }
@@ -91,9 +93,9 @@ impl KvsEngine for KvStore {
             let uuid = header.uuid;
             if header.min_key_hash <= key_hash && key_hash <= header.max_key_hash {
                 let page = self.read_page(&uuid)?;
-                trace!("Reading page {:?}", &page.header);
+                trace!(self.slog, "Reading page {:?}", &page.header);
 
-                trace!("{}", &page.body.key_hash[0]);
+                trace!(self.slog, "{}", &page.body.key_hash[0]);
                 for (index, hash) in page.body.key_hash[..].iter().enumerate() {
                     // FIXME: use binary search
                     if hash != &key_hash {
@@ -108,13 +110,13 @@ impl KvsEngine for KvStore {
                     let mut data = self.read_data(&uuid)?;
                     let bytes = data.get(value_index as usize).expect("bad index");
                     let value = String::from_utf8_lossy(bytes).into_owned();
-                    debug!("Found {} on disk", value);
+                    trace!(self.slog, "Found {} on disk", value);
                     return Ok(Some(value));
                 }
             }
         }
 
-        debug!("Key not found");
+        trace!(self.slog, "Key not found");
         Ok(None)
     }
 
@@ -135,17 +137,23 @@ impl Drop for KvStore {
 }
 
 impl KvStore {
-    /// Creates a `KvStore` by opening all of the log files in the given path.
     pub fn open(path: &Path) -> Result<KvStore> {
+        let logger = crate::get_default_logger();
+        KvStore::open_with_logger(path, &logger)
+    }
+
+    /// Creates a `KvStore` by opening all of the log files in the given path.
+    pub fn open_with_logger(path: &Path, logger: &Logger) -> Result<KvStore> {
         let log_path = path.to_owned();
+
+        let slog = logger.new(o!("path" => format!("{:?}", &log_path)));
 
         if !log_path.is_dir() {
             return Err(Error::Message("Path is not a directory".to_owned()));
         }
 
-        trace!("Opening KvStore at {:?}", &log_path);
-
         let mut kvs = KvStore {
+            slog,
             log_path,
             page_readers: HashMap::new(),
             data_readers: HashMap::new(),
@@ -170,7 +178,7 @@ impl KvStore {
             .truncate(true)
             .write(true)
             .open(path)?;
-        trace!("Writing {:?}", &self.index);
+        trace!(self.slog, "Writing {:?}", &self.index);
         bincode::serialize_into(file, &self.index)?;
         Ok(())
     }
@@ -178,17 +186,17 @@ impl KvStore {
     /// Read the index from the index file.
     fn read_index(&mut self) -> Result<()> {
         let path = self.log_path.join(Index::path());
-        trace!("Reading index at {:?}", &path);
+        trace!(self.slog, "Reading index at {:?}", &path);
         match OpenOptions::new().read(true).open(path) {
             Ok(file) => {
-                trace!("Deserializing index");
+                trace!(self.slog, "Deserializing index");
                 self.index = bincode::deserialize_from(file)?;
-                trace!("Index has {:?} entries", self.index.len());
+                trace!(self.slog, "Index has {:?} entries", self.index.len());
                 Ok(())
             }
             Err(e) => match e.kind() {
                 std::io::ErrorKind::NotFound => {
-                    trace!("Index not found");
+                    trace!(self.slog, "Index not found");
                     self.index = Index::default();
                     Ok(())
                 }
@@ -223,7 +231,7 @@ impl KvStore {
         let header = PageHeader::new(&self.node_id, &self.context, min, max, i as u16)?;
         self.index.push(header.clone());
         let page = Page { body, header };
-        trace!("{}", &page.body.key_hash[0]);
+        trace!(self.slog, "{}", &page.body.key_hash[0]);
 
         let page_path = self.log_path.join(Page::path(&page.header.uuid));
         let mut page_file = OpenOptions::new()
@@ -240,7 +248,7 @@ impl KvStore {
             .open(data_path)?;
         bincode::serialize_into(data_file, &data)?;
 
-        info!("Wrote {} commands to disk", i);
+        info!(self.slog, "Wrote {} commands to disk", i);
 
         Ok(())
     }
@@ -283,7 +291,7 @@ impl KvStore {
 
     /// Append a log entry to the end of the log.
     fn push(&mut self, key: String, value: Option<String>) -> Result<()> {
-        debug!("Pushing ({:?}, {:?})", &key, &value);
+        trace!(self.slog, "Pushing ({:?}, {:?})", &key, &value);
         self.in_memory.insert(InMemoryKey::new(key), value);
         if self.in_memory.len() >= COMMANDS_PER_PAGE {
             self.write_page()?;
