@@ -35,19 +35,6 @@ fn cli_get_non_existent_key() {
         .stdout(eq("Key not found").trim());
 }
 
-// `kvs rm <KEY>` should print "Key not found" for an empty database and exit with non-zero code.
-#[test]
-fn cli_rm_non_existent_key() {
-    let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    Command::cargo_bin("kvs")
-        .unwrap()
-        .args(&["rm", "key1"])
-        .current_dir(&temp_dir)
-        .assert()
-        .failure()
-        .stdout(eq("Key not found").trim());
-}
-
 // `kvs set <KEY> <VALUE>` should print nothing and exit with zero.
 #[test]
 fn cli_set() {
@@ -254,7 +241,7 @@ fn get_non_existent_value() -> Result<()> {
 fn remove_non_existent_key() -> Result<()> {
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
-    assert!(store.remove("key1".to_owned()).is_err());
+    assert!(store.remove("key1".to_owned()).is_ok());
     Ok(())
 }
 

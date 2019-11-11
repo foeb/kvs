@@ -1,4 +1,3 @@
-use bincode;
 use serde::{de, ser};
 use std::fmt;
 use std::io;
@@ -14,9 +13,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// Returned by serde when deserializing log entries.
     Message(String),
-
-    /// Bincode (the format we use for log entries) has its own error type.
-    BincodeError(bincode::Error),
 
     /// Reading/writing/seeking
     IoError(io::Error),
@@ -53,12 +49,6 @@ impl From<uuid::Error> for Error {
 impl From<SystemTimeError> for Error {
     fn from(error: SystemTimeError) -> Self {
         Error::SystemTimeError(error)
-    }
-}
-
-impl From<bincode::Error> for Error {
-    fn from(error: bincode::Error) -> Self {
-        Error::BincodeError(error)
     }
 }
 

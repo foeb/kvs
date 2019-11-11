@@ -3,14 +3,13 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 #[derive(Default, Serialize, Deserialize)]
-struct Slotted {
+pub struct Slotted {
     header: SlottedHeader,
     body: SlottedBody,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct SlottedHeader {
-    pub uuid: Uuid,
     offsets: Vec<u16>,
     lens: Vec<u16>,
 }
@@ -21,10 +20,9 @@ struct SlottedBody {
 }
 
 impl Slotted {
-    pub fn new(uuid: Uuid) -> Self {
+    pub fn new() -> Self {
         Slotted {
             header: SlottedHeader {
-                uuid,
                 offsets: Vec::default(),
                 lens: Vec::default(),
             },
@@ -32,13 +30,15 @@ impl Slotted {
         }
     }
 
-    pub fn push(&mut self, bytes: &[u8]) {
+    pub fn push(&mut self, bytes: &[u8]) -> usize {
+        let index = self.header.offsets.len();
         let offset = self.body.bin.len() as u16;
         self.header.offsets.push(offset);
         self.header.lens.push(bytes.len() as u16);
         for byte in bytes {
             self.body.bin.push(*byte);
         }
+        index
     }
 
     pub fn get(&mut self, index: usize) -> Option<&[u8]> {
@@ -52,7 +52,7 @@ impl Slotted {
         None
     }
 
-    pub fn path(&self) -> PathBuf {
-        Path::new(format!("{}.data", self.header.uuid.to_hyphenated_ref()).as_str()).to_owned()
+    pub fn path(uuid: &Uuid) -> PathBuf {
+        Path::new(format!("{}.data", uuid.to_hyphenated_ref()).as_str()).to_owned()
     }
 }

@@ -1,40 +1,24 @@
-use crate::Result;
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::v1::{ClockSequence, Timestamp};
 use uuid::Uuid;
 
+#[derive(Default)]
 pub struct Page {
     pub header: PageHeader,
     pub body: PageBody,
 }
 
-impl Default for Page {
-    fn default() -> Self {
-        Page {
-            header: PageHeader::default(),
-            body: PageBody {
-                key_hash: [0; COMMANDS_PER_PAGE],
-                value_index: [0; COMMANDS_PER_PAGE],
-            },
-        }
-    }
-}
-
 impl Page {
-    pub fn new(header: PageHeader) -> Self {
-        Page {
-            header,
-            body: PageBody {
-                key_hash: [0; COMMANDS_PER_PAGE],
-                value_index: [0; COMMANDS_PER_PAGE],
-            },
-        }
+    pub fn path(uuid: &Uuid) -> PathBuf {
+        Path::new(format!("{}.log", uuid.to_hyphenated_ref()).as_str()).to_owned()
     }
 }
 
-pub const MAGIC: u64 = 0x78736769;
+pub const MAGIC: u64 = 0x7873_6769;
 
 pub const RESERVE_BYTES_FOR_HEADER: usize = 384;
 
@@ -44,6 +28,7 @@ pub struct PageHeader {
     pub ticks: u64,
     pub min_key_hash: u64,
     pub max_key_hash: u64,
+    pub count: u16,
 }
 
 impl Default for PageHeader {
@@ -53,6 +38,7 @@ impl Default for PageHeader {
             ticks: 0,
             min_key_hash: 0,
             max_key_hash: 0,
+            count: 0,
         }
     }
 }
@@ -63,6 +49,7 @@ impl PageHeader {
         context: &impl ClockSequence,
         min_key_hash: u64,
         max_key_hash: u64,
+        count: u16,
     ) -> Result<Self> {
         let now = SystemTime::now();
         let since_epoch = now.duration_since(UNIX_EPOCH)?;
@@ -74,11 +61,12 @@ impl PageHeader {
             ticks: timestamp.to_rfc4122().0,
             min_key_hash,
             max_key_hash,
+            count,
         })
     }
 
-    pub fn path(&self) -> PathBuf {
-        Path::new(format!("{}.log", self.uuid.to_hyphenated_ref()).as_str()).to_owned()
+    pub fn is_partial(&self) -> bool {
+        self.count != COMMANDS_PER_PAGE as u16
     }
 }
 
@@ -89,10 +77,41 @@ pub struct PageBody {
     pub value_index: [i16; COMMANDS_PER_PAGE],
 }
 
+impl Default for PageBody {
+    fn default() -> Self {
+        PageBody {
+            key_hash: [0; COMMANDS_PER_PAGE],
+            value_index: [0; COMMANDS_PER_PAGE],
+        }
+    }
+}
+
 pub const BUF_SIZE: usize = 16384;
 
-pub struct PageBuffer<'a> {
-    pub buf: &'a mut [u8; BUF_SIZE],
+pub struct PageBuffer {
+    pub buf: [u8; BUF_SIZE],
+}
+
+impl PageBuffer {
+    pub fn read_from(&mut self, reader: &mut impl Read) -> Result<()> {
+        let mut attempts = 0;
+        let mut remaining = BUF_SIZE;
+        while remaining > 0 {
+            if attempts > 1000 {
+                return Err(Error::Message("Failed to load buffer after many attempts".to_owned()))
+            }
+
+            let n = reader.read(&mut self.buf[BUF_SIZE - remaining..])?;
+            remaining -= n;
+            attempts += 1;
+        }
+        Ok(())
+    }
+
+    pub fn write_to(&self, writer: &mut impl Write) -> Result<()> {
+        writer.write_all(&self.buf[..])?;
+        Ok(())
+    }
 }
 
 macro_rules! write_bytes {
@@ -111,10 +130,10 @@ macro_rules! write_int {
     };
 }
 
-impl<'a> PageBuffer<'a> {
+impl PageBuffer {
     pub fn serialize(&mut self, page: &Page) {
         self.serialize_header(&page.header);
-        self.serialize_body(&page.body);
+        self.serialize_body(&page.body, page.header.count as usize);
     }
 
     fn serialize_header(&mut self, header: &PageHeader) {
@@ -132,28 +151,32 @@ impl<'a> PageBuffer<'a> {
         // Min/max key hashes
         write_int!(self.buf, index, header.min_key_hash);
         write_int!(self.buf, index, header.max_key_hash);
+
+        // Count
+        write_int!(self.buf, index, header.count);
     }
 
     // FIXME: broken on platforms that don't use little endianness
-    fn serialize_body(&mut self, body: &PageBody) {
+    fn serialize_body(&mut self, body: &PageBody, count: usize) {
         let offset = RESERVE_BYTES_FOR_HEADER;
         let key_hash_bytes = &body.key_hash as *const _ as *const u8;
-        for i in 0..COMMANDS_PER_PAGE * 8 {
-            self.buf[offset + i] = unsafe { *key_hash_bytes.offset(i as isize) };
+        for i in 0..count as usize * 8 {
+            self.buf[offset + i] = unsafe { *key_hash_bytes.add(i) };
         }
 
         let offset = RESERVE_BYTES_FOR_HEADER + COMMANDS_PER_PAGE * 8;
         let value_index_bytes = &body.value_index as *const _ as *const u8;
-        for i in 0..COMMANDS_PER_PAGE * 2 {
-            self.buf[offset + i] = unsafe { *value_index_bytes.offset(i as isize) };
+        for i in 0..count as usize * 2 {
+            self.buf[offset + i] = unsafe { *value_index_bytes.add(i) };
         }
     }
 }
 
-impl<'a> PageBuffer<'a> {
+impl PageBuffer {
     pub fn deserialize(&self, page: &mut Page) -> Result<()> {
         self.deserialize_header(&mut page.header)?;
-        self.deserialize_body(&mut page.body);
+        let count = page.header.count;
+        self.deserialize_body(&mut page.body, count as usize);
         Ok(())
     }
 
@@ -162,54 +185,61 @@ impl<'a> PageBuffer<'a> {
 
         let mut u128_buf = [0u8; 16];
         let mut u64_buf = [0u8; 8];
+        let mut u16_buf = [0u8; 2];
 
         // Magic number
-        for i in 0..8 {
-            u64_buf[i] = self.buf[i + index];
+        for (i, byte) in u64_buf.iter_mut().enumerate() {
+            *byte = self.buf[i + index];
         }
         index += 8;
         assert_eq!(MAGIC, u64::from_le_bytes(u64_buf));
 
         // UUID
-        for i in 0..16 {
-            u128_buf[i] = self.buf[i + index];
+        for (i, byte) in u128_buf.iter_mut().enumerate() {
+            *byte = self.buf[i + index];
         }
         index += 16;
         header.uuid = Uuid::from_slice(&u128_buf)?;
 
         // Timestamp
-        for i in 0..8 {
-            u64_buf[i] = self.buf[i + index];
+        for (i, byte) in u64_buf.iter_mut().enumerate() {
+            *byte = self.buf[i + index];
         }
         index += 8;
         let ticks = u64::from_le_bytes(u64_buf);
         header.ticks = ticks;
 
         // Min/max key hashes
-        for i in 0..8 {
-            u64_buf[i] = self.buf[i + index];
+        for (i, byte) in u64_buf.iter_mut().enumerate() {
+            *byte = self.buf[i + index];
         }
         index += 8;
         header.min_key_hash = u64::from_le_bytes(u64_buf);
 
-        for i in 0..8 {
-            u64_buf[i] = self.buf[i + index];
+        for (i, byte) in u64_buf.iter_mut().enumerate() {
+            *byte = self.buf[i + index];
         }
+        index += 8;
         header.max_key_hash = u64::from_le_bytes(u64_buf);
+
+        // Count
+        u16_buf[0] = self.buf[index];
+        u16_buf[1] = self.buf[index + 1];
+        header.count = u16::from_le_bytes(u16_buf);
 
         Ok(())
     }
 
-    fn deserialize_body(&self, body: &mut PageBody) {
+    fn deserialize_body(&self, body: &mut PageBody, count: usize) {
         let offset = RESERVE_BYTES_FOR_HEADER;
-        for i in 0..COMMANDS_PER_PAGE {
+        for i in 0..count {
             let key_hash_bytes: *const [u8; 8] =
                 (&self.buf[offset + i * 8..] as &[u8]).as_ptr() as *const [u8; 8];
             body.key_hash[i] = unsafe { u64::from_le_bytes(*key_hash_bytes) };
         }
 
         let offset = RESERVE_BYTES_FOR_HEADER + COMMANDS_PER_PAGE * 8;
-        for i in 0..COMMANDS_PER_PAGE {
+        for i in 0..count {
             let value_index_bytes: *const [u8; 2] =
                 (&self.buf[offset + i * 2..] as &[u8]).as_ptr() as *const [u8; 2];
             body.value_index[i] = unsafe { i16::from_le_bytes(*value_index_bytes) };

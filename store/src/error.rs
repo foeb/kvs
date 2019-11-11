@@ -1,24 +1,22 @@
 use logformat;
-use logformat::mem::Key;
-
-use std::fmt;
+use std::fmt::{Display, self};
 use std::io;
+use bincode;
 
 #[derive(Debug)]
 pub enum Error {
     Message(String),
-    NonExistentKey(Key),
+    NonExistentKey,
     IoError(io::Error),
     LogFormatError(logformat::Error),
+    BincodeError(bincode::Error)
 }
 
-impl fmt::Display for Error {
+impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Message(err) => fmt::Display::fmt(err, f),
-            Error::NonExistentKey(key) => write!(f, "Key not found: {}", key),
-            Error::IoError(err) => fmt::Display::fmt(err, f),
-            Error::LogFormatError(err) => fmt::Display::fmt(err, f),
+            Error::NonExistentKey => write!(f, "Key not found"),
+            _ => write!(f, "{:?}", self),
         }
     }
 }
@@ -32,5 +30,11 @@ impl From<io::Error> for Error {
 impl From<logformat::Error> for Error {
     fn from(error: logformat::Error) -> Self {
         Error::LogFormatError(error)
+    }
+}
+
+impl From<bincode::Error> for Error {
+    fn from(error: bincode::Error) -> Self {
+        Error::BincodeError(error)
     }
 }

@@ -1,9 +1,16 @@
 use crate::{Error, Result};
-use logformat::{file, mem, LogReader, LogWriter};
-use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter};
+use bincode;
+use logformat::index::Index;
+use logformat::page::{Page, PageBody, PageBuffer, PageHeader, BUF_SIZE, COMMANDS_PER_PAGE};
+use logformat::slotted::Slotted;
+use metrohash::MetroHash64;
+use std::cmp;
+use std::collections::{BTreeMap, HashMap};
+use std::fs::{File, OpenOptions};
+use std::hash::{Hash, Hasher};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use uuid::{v1, Uuid};
 
 pub trait KvsEngine {
     fn set(&mut self, key: String, value: String) -> Result<()>;
@@ -13,37 +20,23 @@ pub trait KvsEngine {
 
 pub struct KvStore {
     log_path: PathBuf,
-    readers: HashMap<Generation, LogReader<BufReader<File>>>,
-    writers: HashMap<Generation, LogWriter<BufWriter<File>>>,
-    current_gen: Generation,
-    index: HashMap<mem::Key, IndexEntry>,
+    index: Index,
+    page_readers: HashMap<Uuid, BufReader<File>>,
+    data_readers: HashMap<Uuid, BufReader<File>>,
+    in_memory: BTreeMap<String, Option<String>>,
+    page_buffer: PageBuffer,
+    node_id: [u8; 6],
+    context: v1::Context,
 }
 
-type Generation = u32;
-
-struct IndexEntry {
-    pub gen: Generation,
-    pub location: u64,
-}
-
-impl IndexEntry {
-    pub fn new(gen: Generation, location: u64) -> Self {
-        IndexEntry { gen, location }
-    }
-}
+const METROHASH_SEED: u64 = 0x385f_829f_0031_3111;
 
 impl KvsEngine for KvStore {
     /// Sets the value of a string key to a string.
     ///
     /// If the key already exists, the previous value will be overwritten.
     fn set(&mut self, key: String, value: String) -> Result<()> {
-        trace!("Setting {} <- {}", &key, &value);
-        let entry = mem::Entry::Set {
-            key: mem::Value::String(key),
-            value: mem::Value::String(value),
-        };
-        let current_gen = self.current_gen;
-        self.push(&current_gen, entry)?;
+        self.push(key, Some(value))?;
         Ok(())
     }
 
@@ -52,62 +45,68 @@ impl KvsEngine for KvStore {
     /// Returns `None` if the given key does not exist.
     fn get(&mut self, key: String) -> Result<Option<String>> {
         trace!("Getting {}", &key);
-        let key_ = mem::Value::String(key);
-        let current_gen = self.current_gen;
-        self.flush(&current_gen)?;
-
-        if let Some(IndexEntry { gen, location }) = self.index.get(&key_) {
-            let reader = self
-                .readers
-                .get_mut(&gen)
-                .expect("Reader not found for generation");
-
-            let entry = reader.entry_at(*location)?;
-            if let Some(mem::Entry::Set { value, .. }) = &entry {
-                return Ok(Some(format!("{}", value)));
+        if let Some(maybe_value) = self.in_memory.get(&key) {
+            if let Some(value) = maybe_value {
+                debug!("Found {} in memory", value);
+                return Ok(Some(value.to_string()));
             } else {
-                warn!(
-                    "Did not find Entry::Set at ({}, {}), instead found {:?}",
-                    *gen, *location, &entry
-                );
+                debug!("Found None in memory");
+                return Ok(None);
             }
-        } else {
-            warn!("Key not found in index: {:?}", &key_);
         }
 
+        let mut hasher = MetroHash64::with_seed(METROHASH_SEED);
+        key.hash(&mut hasher);
+        let key_hash = hasher.finish();
+
+        let len = self.index.len();
+        for i in 0..len {
+            let header = self.index.get(len - i - 1).unwrap();
+            let uuid = header.uuid;
+            if header.min_key_hash <= key_hash && key_hash <= header.max_key_hash {
+                let page = self.read_page(&uuid)?;
+                trace!("Reading page {:?}", &page.header);
+
+                trace!("{}", &page.body.key_hash[0]);
+                for (index, hash) in page.body.key_hash[..].iter().enumerate() {
+                    // FIXME: use binary search
+                    if hash != &key_hash {
+                        continue;
+                    }
+
+                    let value_index = page.body.value_index[index];
+                    if value_index < 0 {
+                        return Ok(None);
+                    }
+
+                    let mut data = self.read_data(&uuid)?;
+                    let bytes = data.get(value_index as usize).expect("bad index");
+                    let value = String::from_utf8_lossy(bytes).into_owned();
+                    debug!("Found {} on disk", value);
+                    return Ok(Some(value));
+                }
+            }
+        }
+
+        debug!("Key not found");
         Ok(None)
     }
 
     /// Remove a given key.
     fn remove(&mut self, key: String) -> Result<()> {
-        trace!("Removing {}", &key);
-        let key_ = mem::Value::String(key);
-        if !self.index.contains_key(&key_) {
-            warn!("Trying to remove key not found in index: {}", &key_);
-            Err(Error::NonExistentKey(key_))
-        } else {
-            let entry = mem::Entry::Remove { key: key_ };
-            let current_gen = self.current_gen;
-            self.push(&current_gen, entry)?;
-            Ok(())
-        }
+        self.push(key, None)?;
+        Ok(())
     }
 }
-
-/// The default capacity of the index (to reduce allocations).
-const DEFAULT_INDEX_CAPACITY: usize = 4000;
 
 impl Drop for KvStore {
     fn drop(&mut self) {
-        for (_, writer) in self.writers.iter_mut() {
-            if let Err(e) = writer.flush() {
-                error!("ERROR FLUSHING LOG TO DISK {:?}", e);
-            }
+        if !self.in_memory.is_empty() {
+            self.write_page().unwrap();
+            self.write_index().unwrap();
         }
     }
 }
-
-const COMPACT_THRESHOLD: u64 = 4000;
 
 impl KvStore {
     /// Creates a `KvStore` by opening the given path as a log.
@@ -120,265 +119,147 @@ impl KvStore {
 
         trace!("Opening KvStore at {:?}", &log_path);
 
-        let generations = fs::read_dir(&log_path)?
-            .map(|e| {
-                e.map(|x| {
-                    x.file_name()
-                        .as_os_str()
-                        .to_str()
-                        .expect("file name is utf-8")
-                        .parse::<Generation>()
-                })
-            })
-            .filter_map(|x| if let Ok(Ok(gen)) = x { Some(gen) } else { None });
-
         let mut kvs = KvStore {
             log_path,
-            readers: HashMap::new(),
-            writers: HashMap::new(),
-            current_gen: generations.max().unwrap_or(0),
-            index: HashMap::with_capacity(DEFAULT_INDEX_CAPACITY),
+            page_readers: HashMap::new(),
+            data_readers: HashMap::new(),
+            index: Index::default(),
+            in_memory: BTreeMap::default(),
+            page_buffer: PageBuffer { buf: [0; BUF_SIZE] },
+            node_id: [b'g', b'o', b'o', b'd', b'!', b'!'],
+            context: v1::Context::new(0),
         };
 
-        trace!("Current generation {}", &kvs.current_gen);
-
-        for gen in 0..kvs.current_gen + 1 {
-            kvs.open_log_file(gen)?;
-            let len = kvs.load(gen)?;
-            debug!("Loaded gen {} with {} entries", gen, len);
-        }
+        kvs.read_index()?;
 
         Ok(kvs)
     }
 
-    fn get_log_path(&self, gen: Generation, is_data: bool, is_temp: bool) -> PathBuf {
-        let temp_part = if is_temp { "-temp" } else { "" };
-        let data_part = if is_data { ".data" } else { "" };
-        let name = format!("{}{}{}", gen, temp_part, data_part);
-        self.log_path.join(Path::new(name.as_str()))
+    fn write_index(&self) -> Result<()> {
+        let path = self.log_path.join(Index::path());
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        trace!("Writing {:?}", &self.index);
+        bincode::serialize_into(file, &self.index)?;
+        Ok(())
     }
 
-    fn open_temp_writer(&self, gen: Generation) -> Result<LogWriter<BufWriter<File>>> {
-        let log_path = self.get_log_path(gen, false, true);
-        let data_path = self.get_log_path(gen, true, true);
-
-        let log_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&log_path)?;
-
-        let data_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&data_path)?;
-
-        let writer = LogWriter::new(
-            BufWriter::new(log_file.try_clone()?),
-            BufWriter::new(data_file.try_clone()?),
-        )?;
-
-        Ok(writer)
-    }
-
-    fn open_log_file(&mut self, gen: Generation) -> Result<()> {
-        let log_path = self.get_log_path(gen, false, false);
-        let data_path = self.get_log_path(gen, true, false);
-
-        let log_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&log_path)?;
-
-        let data_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&data_path)?;
-
-        self.readers.insert(
-            gen,
-            LogReader::new(
-                BufReader::new(log_file.try_clone()?),
-                BufReader::new(data_file.try_clone()?),
-            )?,
-        );
-
-        let old_writer = self.writers.insert(
-            gen,
-            LogWriter::new(
-                BufWriter::new(log_file.try_clone()?),
-                BufWriter::new(data_file.try_clone()?),
-            )?,
-        );
-
-        if let Some(mut writer) = old_writer {
-            writer.flush()?;
+    fn read_index(&mut self) -> Result<()> {
+        let path = self.log_path.join(Index::path());
+        trace!("Reading index at {:?}", &path);
+        match OpenOptions::new().read(true).open(path) {
+            Ok(file) => {
+                trace!("Deserializing index");
+                self.index = bincode::deserialize_from(file)?;
+                trace!("Index has {:?} entries", self.index.len());
+                Ok(())
+            }
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    trace!("Index not found");
+                    self.index = Index::default();
+                    Ok(())
+                }
+                _ => Err(Error::IoError(e)),
+            },
         }
+    }
+
+    fn write_page(&mut self) -> Result<()> {
+        let mut min = std::u64::MAX;
+        let mut max = std::u64::MIN;
+        let mut body = PageBody::default();
+        let mut data = Slotted::new();
+
+        let mut i = 0;
+        for (key, value) in self.in_memory.iter() {
+            if i >= COMMANDS_PER_PAGE {
+                panic!("Writing page with more than COMMANDS_PER_PAGE commands");
+            }
+
+            let mut hasher = MetroHash64::with_seed(METROHASH_SEED);
+            key.hash(&mut hasher);
+            let key_hash = hasher.finish();
+
+            min = cmp::min(min, key_hash);
+            max = cmp::max(max, key_hash);
+            let value_index = value.as_ref().map(|s| data.push(s.as_bytes()) as i16);
+            body.key_hash[i] = key_hash;
+            body.value_index[i] = value_index.unwrap_or(-1);
+
+            i += 1;
+        }
+
+        let header = PageHeader::new(&self.node_id, &self.context, min, max, i as u16)?;
+        self.index.push(header.clone());
+        let page = Page { body, header };
+        trace!("{}", &page.body.key_hash[0]);
+
+        let page_path = self.log_path.join(Page::path(&page.header.uuid));
+        let mut page_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(page_path)?;
+        self.page_buffer.serialize(&page);
+        self.page_buffer.write_to(&mut page_file)?;
+
+        let data_path = self.log_path.join(Slotted::path(&page.header.uuid));
+        let data_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(data_path)?;
+        bincode::serialize_into(data_file, &data)?;
+
+        info!("Wrote {} commands to disk", i);
 
         Ok(())
     }
 
-    /// Put the entry into the index with the given position in the log file.
-    fn index_entry(&mut self, entry: mem::Entry, gen: Generation, pos: u64) {
-        debug!("Indexing entry {:?} at gen {}, {}", &entry, gen, pos);
-        match entry {
-            mem::Entry::Set { key, .. } => {
-                self.index.insert(key, IndexEntry::new(gen, pos));
-            }
-            mem::Entry::Remove { key } => {
-                self.index.remove(&key);
-            }
+    fn read_page(&mut self, uuid: &Uuid) -> Result<Page> {
+        if !self.page_readers.contains_key(&uuid) {
+            let path = self.log_path.join(Page::path(uuid));
+            let file = OpenOptions::new().read(true).open(path)?;
+            self.page_readers.insert(*uuid, BufReader::new(file));
+        }
+
+        if let Some(reader) = self.page_readers.get_mut(uuid) {
+            reader.seek(SeekFrom::Start(0))?;
+            let mut page = Page::default();
+            self.page_buffer.read_from(reader)?;
+            self.page_buffer.deserialize(&mut page)?;
+            Ok(page)
+        } else {
+            panic!("Error retrieving cached reader")
         }
     }
 
-    fn flush(&mut self, gen: &Generation) -> Result<()> {
-        let writer = self
-            .writers
-            .get_mut(gen)
-            .expect("Writer not found for generation");
-        writer.flush()?;
-        trace!("Flushed writer for gen {}", gen);
-        Ok(())
+    fn read_data(&mut self, uuid: &Uuid) -> Result<Slotted> {
+        if !self.data_readers.contains_key(&uuid) {
+            let path = self.log_path.join(Slotted::path(uuid));
+            let file = OpenOptions::new().read(true).open(path)?;
+            self.data_readers.insert(*uuid, BufReader::new(file));
+        }
+
+        if let Some(reader) = self.data_readers.get_mut(uuid) {
+            reader.seek(SeekFrom::Start(0))?;
+            let data = bincode::deserialize_from(reader)?;
+            Ok(data)
+        } else {
+            panic!("Error retrieving cached reader")
+        }
     }
 
     /// Append a log entry to the end of the log.
-    fn push(&mut self, gen: &Generation, entry: mem::Entry) -> Result<u64> {
-        debug!("Pushing entry {:?}", entry);
-        let writer = self
-            .writers
-            .get_mut(&gen)
-            .expect("Writer not found for generation");
-
-        let pos = writer.write_entry(&entry)?;
-        self.index_entry(entry, *gen, pos);
-
-        if pos > COMPACT_THRESHOLD {
-            self.compact_all()?;
+    fn push(&mut self, key: String, value: Option<String>) -> Result<()> {
+        debug!("Pushing ({:?}, {:?})", &key, &value);
+        self.in_memory.insert(key, value);
+        if self.in_memory.len() >= COMMANDS_PER_PAGE {
+            self.write_page()?;
+            self.in_memory = BTreeMap::new();
         }
-
-        Ok(pos)
-    }
-
-    /// Load the log from disk.
-    fn load(&mut self, gen: Generation) -> Result<u64> {
-        trace!("Loading log from disk for gen {}", gen);
-        self.flush(&gen)?;
-        let reader = self
-            .readers
-            .get_mut(&gen)
-            .expect("Reader not found for generation");
-        reader.seek(0)?;
-
-        let mut entries: Vec<(mem::Entry, u64)> = Vec::new();
-        let mut pos = 0;
-        while let Some(entry) = reader.read_entry()? {
-            trace!("{}: {:?}", &pos, &entry);
-            entries.push((entry, pos));
-            pos += 1;
-        }
-
-        for (entry, pos) in entries {
-            self.index_entry(entry, gen, pos);
-        }
-
-        let writer = self
-            .writers
-            .get_mut(&gen)
-            .expect("Reader not found for generation");
-        writer.set_pos(pos);
-
-        Ok(pos)
-    }
-
-    fn compact_all(&mut self) -> Result<()> {
-        let mut new_len = 0;
-        for gen in 0..self.current_gen + 1 {
-            new_len = self.compact(gen)?;
-        }
-
-        if new_len > COMPACT_THRESHOLD {
-            self.current_gen += 1;
-            self.open_log_file(self.current_gen)?;
-        };
-
         Ok(())
-    }
-
-    fn compact(&mut self, gen: Generation) -> Result<u64> {
-        let mut writer = self.open_temp_writer(gen)?;
-
-        self.flush(&gen)?;
-        let reader = self
-            .readers
-            .get_mut(&gen)
-            .expect("Reader not found for generation");
-        reader.seek(0)?;
-
-        trace!("Starting compaction");
-
-        let mut entries_deleted = 0;
-        let mut reader_pos = 0;
-        while let Some(entry) = reader.read_file_entry()? {
-            trace!("Read {:?}", &entry);
-            match &entry {
-                file::Entry::Set { key, value } => {
-                    let mem_key = reader.lookup_file_value(&key)?;
-                    if let Some(index_entry) = self.index.get(&mem_key) {
-                        trace!(
-                            "Found location in index for gen {}: {}, comparing to reader_pos {} in gen {}",
-                            index_entry.gen,
-                            index_entry.location,
-                            reader_pos,
-                            gen,
-                        );
-
-                        if index_entry.gen == gen && index_entry.location == reader_pos {
-                            let mem_value = reader.lookup_file_value(&value)?;
-                            writer.write_entry(&mem::Entry::Set {
-                                key: mem_key,
-                                value: mem_value,
-                            })?;
-                        } else {
-                            debug!("Deleting Entry::Set at gen {}, {}", gen, reader_pos);
-                            entries_deleted += 1;
-                        }
-                    }
-                }
-                file::Entry::Remove { key } => {
-                    let mem_key = reader.lookup_file_value(&key)?;
-                    if !self.index.contains_key(&mem_key) {
-                        writer.write_entry(&mem::Entry::Remove { key: mem_key })?;
-                    } else {
-                        debug!("Deleting Entry::Remove at gen {}, {}", gen, reader_pos);
-                        entries_deleted += 1;
-                    }
-                }
-            }
-            reader_pos += 1;
-        }
-
-        writer.flush()?;
-
-        std::fs::rename(
-            self.get_log_path(gen, false, true),
-            self.get_log_path(gen, false, false),
-        )?;
-
-        std::fs::rename(
-            self.get_log_path(gen, true, true),
-            self.get_log_path(gen, true, false),
-        )?;
-
-        self.open_log_file(gen)?;
-
-        info!(
-            "Finished compaction: removed {} out of {} entries",
-            entries_deleted, reader_pos
-        );
-
-        Ok(reader_pos)
     }
 }

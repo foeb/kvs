@@ -2,8 +2,8 @@ use crate::page::PageHeader;
 use serde::{Serialize, Deserialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Default, Serialize, Deserialize)]
-struct Index {
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Index {
     headers: Vec<PageHeader>,
 }
 
@@ -20,7 +20,11 @@ impl Index {
         self.headers.len()
     }
 
-    pub fn path(&self) -> PathBuf {
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+    }
+
+    pub fn path() -> PathBuf {
         Path::new("index").to_owned()
     }
 }

@@ -1,7 +1,7 @@
 use clap::{App, AppSettings, Arg, SubCommand};
 use env_logger;
 
-use store::{Error, KvStore, KvsEngine, Result};
+use store::{KvStore, KvsEngine, Result};
 
 use std::env::current_dir;
 use std::process::exit;
@@ -64,11 +64,10 @@ fn main() -> Result<()> {
             let mut store = KvStore::open(current_dir()?.as_path())?;
             match store.remove(key) {
                 Ok(()) => {}
-                Err(Error::NonExistentKey(_)) => {
-                    println!("Key not found");
+                Err(e) => {
+                    println!("{}", e);
                     exit(1);
                 }
-                Err(e) => return Err(e),
             }
         }
         _ => unreachable!(),
