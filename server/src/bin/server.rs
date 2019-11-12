@@ -20,29 +20,31 @@ fn main() -> Result<()> {
         .author(env!("CARGO_PKG_AUTHORS"))
         .about(env!("CARGO_PKG_DESCRIPTION"))
         .setting(AppSettings::DisableHelpSubcommand)
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .setting(AppSettings::VersionlessSubcommands)
-        .subcommand(
-            SubCommand::with_name("set")
-                .about("Set the value of a string key to a string")
-                .arg(Arg::with_name("KEY").help("A string key").required(true))
-                .arg(
-                    Arg::with_name("VALUE")
-                        .help("The string value of the key")
-                        .required(true),
-                ),
+        .arg(
+            Arg::with_name("addr")
+                .value_name("IP-ADDR")
+                .required(false)
+                .default_value("127.0.0.1:4000"),
         )
-        .subcommand(
-            SubCommand::with_name("get")
-                .about("Get the string value of a given string key")
-                .arg(Arg::with_name("KEY").help("A string key").required(true)),
-        )
-        .subcommand(
-            SubCommand::with_name("rm")
-                .about("Remove a given key")
-                .arg(Arg::with_name("KEY").help("A string key").required(true)),
+        .arg(
+            Arg::with_name("engine")
+                .value_name("ENGINE-NAME")
+                .possible_values(&["kvs", "sled"])
+                .required(false)
+                .default_value("kvs")
+                .takes_value(true),
         )
         .get_matches();
+
+    let addr = matches.value_of("addr").unwrap();
+    let engine = matches.value_of("engine").unwrap();
+
+    if engine != "kvs" && engine != "sled" {
+        panic!("Invalid engine: {}", engine);
+    }
+
+    info!(logger, "IP-ADDR: {}", addr);
+    info!(logger, "ENGINE-NAME: {}", engine);
 
     Ok(())
 }
