@@ -4,11 +4,11 @@ extern crate slog_async;
 extern crate slog_term;
 
 use bincode;
-use clap::{App, AppSettings, Arg, SubCommand};
-use kvs::{Engine, Error, Result, CommandRequest, CommandResponse};
+use clap::{App, AppSettings, Arg};
+use kvs::{CommandRequest, CommandResponse, Engine, Error, Result};
+use server::KvStore;
 use slog::Drain;
 use std::env::current_dir;
-use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::process::exit;
 
@@ -42,18 +42,21 @@ fn main() -> Result<()> {
     let addr = matches.value_of("addr").unwrap();
     let engine = matches.value_of("engine").unwrap();
 
-    if engine != "kvs" && engine != "sled" {
-        panic!("Invalid engine: {}", engine);
-    }
-
     info!(logger, "IP-ADDR: {}", addr);
     info!(logger, "ENGINE-NAME: {}", engine);
 
-    let mut buf = [0u8; 1024];
+    let mut engine = if engine == "kvs" {
+        KvStore::open(current_dir()?.as_path())?
+    } else if engine == "sled" {
+        unimplemented!();
+    } else {
+        panic!("Invalid engine: {}", engine);
+    };
+
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
+            Ok(stream) => {
                 match stream.peer_addr() {
                     Ok(peer_addr) => info!(logger, "{} connected!", peer_addr),
                     Err(e) => {
@@ -62,9 +65,26 @@ fn main() -> Result<()> {
                     }
                 }
 
-                if let Ok(request) = bincode::deserialize_from::<&TcpStream, CommandRequest>(&stream) {
+                if let Ok(request) =
+                    bincode::deserialize_from::<&TcpStream, CommandRequest>(&stream)
+                {
                     info!(logger, "REQUEST: {:?}", request);
-                    let response = CommandResponse::Message("Thanks!".to_owned());
+
+                    let response = match request {
+                        CommandRequest::Get { key } => engine
+                            .get(key)
+                            .map(|x| CommandResponse::Message(format!("{:?}", x))),
+                        CommandRequest::Set { key, value } => if let Some(value) = value {
+                            engine.set(key, value)
+                        } else {
+                            engine.remove(key)
+                        }
+                        .map(|_| CommandResponse::Message("Success".to_owned())),
+                    }
+                    .unwrap_or_else(|e| CommandResponse::Message(format!("Error: {}", e)));
+
+                    info!(logger, "RESPONSE: {:?}", &response);
+
                     if let Err(e) = bincode::serialize_into(&stream, &response) {
                         error!(logger, "{}", e);
                     }
