@@ -7,6 +7,8 @@ use clap::{App, AppSettings, Arg, SubCommand};
 use kvs::{Engine, Error, Result};
 use slog::Drain;
 use std::env::current_dir;
+use std::io::Read;
+use std::net::{TcpListener, TcpStream};
 use std::process::exit;
 
 fn main() -> Result<()> {
@@ -45,6 +47,18 @@ fn main() -> Result<()> {
 
     info!(logger, "IP-ADDR: {}", addr);
     info!(logger, "ENGINE-NAME: {}", engine);
+
+    let mut buf = [0u8; 1024];
+    let listener = TcpListener::bind(addr)?;
+    for stream in listener.incoming() {
+        let n = stream?.read(&mut buf)?;
+        if n > 0 {
+            let s = String::from_utf8_lossy(&buf[0..n]);
+            info!(logger, "MESSAGE: {}", s);
+        } else {
+            break;
+        }
+    }
 
     Ok(())
 }
