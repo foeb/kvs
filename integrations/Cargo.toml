@@ -1,0 +1,16 @@
+[package]
+name = "integrations"
+version = "0.1.0"
+authors = ["Phoebe Bell <minaphoebebell@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+server = { path = "../server" }
+client = { path = "../client" }
+kvs = { path = "../kvs" }
+
+[dev-dependencies]
+assert_cmd = "0.11.0"
+predicates = "1.0.0"
+tempfile = "3.0.7"
+walkdir = "2.2.7"

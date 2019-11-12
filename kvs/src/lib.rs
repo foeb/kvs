@@ -6,7 +6,10 @@ extern crate slog_async;
 
 use slog::Drain;
 
-fn get_default_logger() -> slog::Logger {
+mod error;
+pub use error::{Error, Result};
+
+pub fn get_default_logger() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::CompactFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
@@ -14,12 +17,9 @@ fn get_default_logger() -> slog::Logger {
     logger
 }
 
-pub mod error;
-mod kv;
+pub trait Engine {
+    fn set(&mut self, key: String, value: String) -> Result<()>;
+    fn get(&mut self, key: String) -> Result<Option<String>>;
+    fn remove(&mut self, key: String) -> Result<()>;
+}
 
-pub use error::Error;
-pub use kv::KvStore;
-pub use kv::KvsEngine;
-
-/// Return type for KvStore operations.
-pub type Result<T> = std::result::Result<T, Error>;

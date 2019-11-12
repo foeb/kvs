@@ -1,5 +1,8 @@
 [workspace]
 members = [
     "logformat",
-    "store",
+    "server",
+    "client",
+    "kvs",
+    "integrations",
 ]

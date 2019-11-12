@@ -3,6 +3,8 @@ use std::fmt::{Display, self};
 use std::io;
 use bincode;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug)]
 pub enum Error {
     Message(String),

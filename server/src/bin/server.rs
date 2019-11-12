@@ -4,10 +4,10 @@ extern crate slog_async;
 extern crate slog_term;
 
 use clap::{App, AppSettings, Arg, SubCommand};
+use kvs::{Engine, Error, Result};
 use slog::Drain;
 use std::env::current_dir;
 use std::process::exit;
-use store::{KvStore, KvsEngine, Result};
 
 fn main() -> Result<()> {
     let decorator = slog_term::TermDecorator::new().build();
@@ -44,40 +44,5 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    match matches.subcommand() {
-        ("set", Some(matches)) => {
-            let key = matches.value_of("KEY").expect("KEY argument missing");
-            let value = matches.value_of("VALUE").expect("VALUE argument missing");
-
-            let mut store = KvStore::open_with_logger(current_dir()?.as_path(), &logger)?;
-            store.set(key.to_string(), value.to_string())?;
-        }
-        ("get", Some(matches)) => {
-            let key = matches.value_of("KEY").expect("KEY argument missing");
-
-            let mut store = KvStore::open_with_logger(current_dir()?.as_path(), &logger)?;
-            if let Some(value) = store.get(key.to_string())? {
-                println!("{}", value);
-            } else {
-                println!("Key not found");
-            }
-        }
-        ("rm", Some(matches)) => {
-            let key = matches
-                .value_of("KEY")
-                .expect("KEY argument missing")
-                .to_owned();
-
-            let mut store = KvStore::open_with_logger(current_dir()?.as_path(), &logger)?;
-            match store.remove(key) {
-                Ok(()) => {}
-                Err(e) => {
-                    println!("{}", e);
-                    exit(1);
-                }
-            }
-        }
-        _ => unreachable!(),
-    }
     Ok(())
 }

@@ -1,5 +1,5 @@
-use crate::{Error, Result};
 use bincode;
+use kvs::{self, Error, Result};
 use logformat::index::Index;
 use logformat::page::{Page, PageBody, PageBuffer, PageHeader, BUF_SIZE, COMMANDS_PER_PAGE};
 use logformat::slotted::Slotted;
@@ -12,12 +12,6 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use uuid::{v1, Uuid};
-
-pub trait KvsEngine {
-    fn set(&mut self, key: String, value: String) -> Result<()>;
-    fn get(&mut self, key: String) -> Result<Option<String>>;
-    fn remove(&mut self, key: String) -> Result<()>;
-}
 
 pub struct KvStore {
     log_path: PathBuf,
@@ -61,19 +55,22 @@ impl PartialOrd for InMemoryKey {
 
 const METROHASH_SEED: u64 = 0x385f_829f_0031_3111;
 
-impl KvsEngine for KvStore {
+impl kvs::Engine for KvStore {
     /// Sets the value of a string key to a string.
     ///
     /// If the key already exists, the previous value will be overwritten.
-    fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.push(key, Some(value))?;
-        Ok(())
+    fn set(&mut self, key: String, value: String) -> kvs::Result<()> {
+        if let Err(e) = self.push(key, Some(value)) {
+            Err(kvs::Error::Message(format!("{}", e)))
+        } else {
+            Ok(())
+        }
     }
 
     /// Gets the string value of a given string key.
     ///
     /// Returns `None` if the given key does not exist.
-    fn get(&mut self, key: String) -> Result<Option<String>> {
+    fn get(&mut self, key: String) -> kvs::Result<Option<String>> {
         trace!(self.slog, "Getting {}", &key);
         let key_with_hash = InMemoryKey::new(key);
         if let Some(maybe_value) = self.in_memory.get(&key_with_hash) {
@@ -92,10 +89,13 @@ impl KvsEngine for KvStore {
             let header = self.index.get(len - i - 1).unwrap();
             let uuid = header.uuid;
             if header.min_key_hash <= key_hash && key_hash <= header.max_key_hash {
-                let page = self.read_page(&uuid)?;
-                trace!(self.slog, "Reading page {:?}", &page.header);
+                let page = self.read_page(&uuid);
+                if let Err(e) = page {
+                    return Err(kvs::Error::Message(format!("{}", e)));
+                }
+                let page = page.unwrap();
 
-                trace!(self.slog, "{}", &page.body.key_hash[0]);
+                trace!(self.slog, "Reading page {:?}", &page.header);
                 for (index, hash) in page.body.key_hash[..].iter().enumerate() {
                     // FIXME: use binary search
                     if hash != &key_hash {
@@ -107,7 +107,11 @@ impl KvsEngine for KvStore {
                         return Ok(None);
                     }
 
-                    let mut data = self.read_data(&uuid)?;
+                    let data = self.read_data(&uuid);
+                    if let Err(e) = data {
+                        return Err(kvs::Error::Message(format!("{}", e)));
+                    }
+                    let mut data = data.unwrap();
                     let bytes = data.get(value_index as usize).expect("bad index");
                     let value = String::from_utf8_lossy(bytes).into_owned();
                     trace!(self.slog, "Found {} on disk", value);
@@ -121,9 +125,12 @@ impl KvsEngine for KvStore {
     }
 
     /// Remove a given key.
-    fn remove(&mut self, key: String) -> Result<()> {
-        self.push(key, None)?;
-        Ok(())
+    fn remove(&mut self, key: String) -> kvs::Result<()> {
+        if let Err(e) = self.push(key, None) {
+            Err(kvs::Error::Message(format!("{}", e)))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -138,7 +145,7 @@ impl Drop for KvStore {
 
 impl KvStore {
     pub fn open(path: &Path) -> Result<KvStore> {
-        let logger = crate::get_default_logger();
+        let logger = kvs::get_default_logger();
         KvStore::open_with_logger(path, &logger)
     }
 
