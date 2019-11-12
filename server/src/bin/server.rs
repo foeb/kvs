@@ -51,12 +51,27 @@ fn main() -> Result<()> {
     let mut buf = [0u8; 1024];
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming() {
-        let n = stream?.read(&mut buf)?;
-        if n > 0 {
-            let s = String::from_utf8_lossy(&buf[0..n]);
-            info!(logger, "MESSAGE: {}", s);
-        } else {
-            break;
+        match stream {
+            Ok(mut stream) => {
+                match stream.peer_addr() {
+                    Ok(peer_addr) => info!(logger, "{} connected!", peer_addr),
+                    Err(e) => {
+                        error!(logger, "{}", e);
+                        continue;
+                    }
+                }
+
+                let n = stream.read(&mut buf)?;
+                if n > 0 {
+                    let s = String::from_utf8_lossy(&buf[0..n]);
+                    info!(logger, "MESSAGE: {}", s);
+                } else {
+                    break;
+                }
+            }
+            Err(e) => {
+                error!(logger, "Could not connect: {:?}", e);
+            }
         }
     }
 
