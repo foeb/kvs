@@ -13,7 +13,7 @@ fn main() -> Result<()> {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::CompactFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
-    let logger = slog::Logger::root(drain, o!("version" => "0.1"));
+    let logger = slog::Logger::root(drain, o!("version" => env!("CARGO_PKG_VERSION")));
 
     let matches = App::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
@@ -22,6 +22,7 @@ fn main() -> Result<()> {
         .setting(AppSettings::DisableHelpSubcommand)
         .arg(
             Arg::with_name("addr")
+                .long("addr")
                 .value_name("IP-ADDR")
                 .required(false)
                 .default_value("127.0.0.1:4000"),
