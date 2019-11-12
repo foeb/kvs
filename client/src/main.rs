@@ -4,7 +4,7 @@ extern crate slog_async;
 extern crate slog_term;
 
 use clap::{App, AppSettings, Arg, SubCommand};
-use kvs::{Engine, Error, Result};
+use kvs::{CommandRequest, CommandResponse, Engine, Error, Result};
 use slog::Drain;
 use std::io::Write;
 use std::net::TcpStream;
@@ -42,25 +42,37 @@ fn main() -> Result<()> {
     info!(logger, "IP-ADDR: {}", addr);
     let mut stream = TcpStream::connect(addr)?;
 
-    match command {
+    let request = match command {
         "get" => {
             let key = args.value_of("key").unwrap();
             info!(logger, "COMMAND: get {}", key);
-            stream.write_all("Hey! I'm getting over here".as_bytes())?;
+            CommandRequest::Get {
+                key: key.to_owned(),
+            }
         }
         "set" => {
             let key = args.value_of("key").unwrap();
             let value = args.value_of("value").unwrap();
             info!(logger, "COMMAND: set {} {}", key, value);
-            stream.write_all("Hey! I'm setting over here".as_bytes())?;
+            CommandRequest::Set {
+                key: key.to_owned(),
+                value: Some(value.to_owned()),
+            }
         }
         "rm" => {
             let key = args.value_of("key").unwrap();
             info!(logger, "COMMAND: rm {}", key);
-            stream.write_all("Hey! I'm too lazy to think of another thing over here".as_bytes())?;
+            CommandRequest::Set {
+                key: key.to_owned(),
+                value: None,
+            }
         }
         _ => unreachable!(),
-    }
+    };
+
+    bincode::serialize_into(&mut stream, &request)?;
+    let response = bincode::deserialize_from::<&TcpStream, CommandResponse>(&stream)?;
+    info!(logger, "> {}", response);
 
     Ok(())
 }

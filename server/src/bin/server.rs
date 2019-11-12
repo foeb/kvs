@@ -3,8 +3,9 @@ extern crate slog;
 extern crate slog_async;
 extern crate slog_term;
 
+use bincode;
 use clap::{App, AppSettings, Arg, SubCommand};
-use kvs::{Engine, Error, Result};
+use kvs::{Engine, Error, Result, CommandRequest, CommandResponse};
 use slog::Drain;
 use std::env::current_dir;
 use std::io::Read;
@@ -61,12 +62,14 @@ fn main() -> Result<()> {
                     }
                 }
 
-                let n = stream.read(&mut buf)?;
-                if n > 0 {
-                    let s = String::from_utf8_lossy(&buf[0..n]);
-                    info!(logger, "MESSAGE: {}", s);
+                if let Ok(request) = bincode::deserialize_from::<&TcpStream, CommandRequest>(&stream) {
+                    info!(logger, "REQUEST: {:?}", request);
+                    let response = CommandResponse::Message("Thanks!".to_owned());
+                    if let Err(e) = bincode::serialize_into(&stream, &response) {
+                        error!(logger, "{}", e);
+                    }
                 } else {
-                    break;
+                    warn!(logger, "Bad request");
                 }
             }
             Err(e) => {

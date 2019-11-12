@@ -4,10 +4,13 @@ extern crate slog;
 extern crate slog_term;
 extern crate slog_async;
 
+mod error;
+mod command;
+
 use slog::Drain;
 
-mod error;
 pub use error::{Error, Result};
+pub use command::{CommandRequest, CommandResponse};
 
 pub fn get_default_logger() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();

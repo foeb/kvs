@@ -10,6 +10,7 @@ slog = "2.5.2"
 slog-async = "2.3.0"
 slog-term = "2.4.2"
 bincode = "1.2.0"
+serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 assert_cmd = "0.11.0"
