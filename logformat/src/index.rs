@@ -1,5 +1,5 @@
 use crate::page::PageHeader;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 // FIXME: make this into a B-tree (or something like it) with pages as leaves

@@ -101,7 +101,9 @@ impl PageBuffer {
         let mut remaining = BUF_SIZE;
         while remaining > 0 {
             if attempts > 1000 {
-                return Err(Error::Message("Failed to load buffer after many attempts".to_owned()))
+                return Err(Error::Message(
+                    "Failed to load buffer after many attempts".to_owned(),
+                ));
             }
 
             let n = reader.read(&mut self.buf[BUF_SIZE - remaining..])?;

@@ -3,9 +3,7 @@ use uuid::v1::Context;
 
 #[test]
 fn can_read_write_page() {
-    let mut buffer = PageBuffer {
-        buf: [0; BUF_SIZE],
-    };
+    let mut buffer = PageBuffer { buf: [0; BUF_SIZE] };
 
     let node_id = &[0, 1, 2, 3, 4, 5];
     let context = Context::new(0);
@@ -32,4 +30,3 @@ fn can_read_write_page() {
         assert_eq!(header, page.header);
     }
 }
-

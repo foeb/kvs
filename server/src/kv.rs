@@ -4,6 +4,7 @@ use logformat::index::Index;
 use logformat::page::{Page, PageBody, PageBuffer, PageHeader, BUF_SIZE, COMMANDS_PER_PAGE};
 use logformat::slotted::Slotted;
 use metrohash::MetroHash64;
+use sled::Db;
 use slog::Logger;
 use std::cmp::{self, Ordering};
 use std::collections::{BTreeMap, HashMap};
@@ -12,6 +13,41 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use uuid::{v1, Uuid};
+
+pub struct SledEngine {
+    pub db: Db,
+}
+
+impl Drop for SledEngine {
+    fn drop(&mut self) {}
+}
+
+impl kvs::Engine for SledEngine {
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        self.db.insert(key, value.as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        let result = self
+            .db
+            .get(key)
+            .map(|x| x.map(|y| String::from_utf8_lossy(&y).into_owned()))?;
+        self.db.flush()?;
+        Ok(result)
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        let result = if let None = self.db.remove(key)? {
+            Err(Error::KeyNotFound)
+        } else {
+            Ok(())
+        };
+        self.db.flush()?;
+        result
+    }
+}
 
 pub struct KvStore {
     log_path: PathBuf,
@@ -126,20 +162,21 @@ impl kvs::Engine for KvStore {
 
     /// Remove a given key.
     fn remove(&mut self, key: String) -> kvs::Result<()> {
-        if let Err(e) = self.push(key, None) {
-            Err(kvs::Error::Message(format!("{}", e)))
+        if let Ok(Some(_)) = self.get(key.clone()) {
+            if let Err(e) = self.push(key, None) {
+                Err(kvs::Error::Message(format!("{}", e)))
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(kvs::Error::KeyNotFound)
         }
     }
 }
 
 impl Drop for KvStore {
     fn drop(&mut self) {
-        if !self.in_memory.is_empty() {
-            self.write_page().unwrap();
-            self.write_index().unwrap();
-        }
+        self.save().unwrap();
     }
 }
 
@@ -174,6 +211,14 @@ impl KvStore {
         kvs.read_index()?;
 
         Ok(kvs)
+    }
+
+    pub fn save(&mut self) -> Result<()> {
+        if !self.in_memory.is_empty() {
+            self.write_page()?;
+            self.write_index()?;
+        }
+        Ok(())
     }
 
     /// Write the index to the index file, truncating the previous one.
@@ -304,6 +349,7 @@ impl KvStore {
             self.write_page()?;
             self.in_memory = BTreeMap::new();
         }
+        self.save().unwrap();
         Ok(())
     }
 }

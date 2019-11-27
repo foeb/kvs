@@ -1,8 +1,8 @@
 use serde::{de, ser};
 use std::fmt;
 use std::io;
-use uuid;
 use std::time::SystemTimeError;
+use uuid;
 
 /// The result type for everything in the logformat crate.
 pub type Result<T> = std::result::Result<T, Error>;

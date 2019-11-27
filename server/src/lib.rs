@@ -6,3 +6,4 @@ extern crate slog_term;
 mod kv;
 
 pub use kv::KvStore;
+pub use kv::SledEngine;

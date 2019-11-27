@@ -1,16 +1,16 @@
 //! A simple key/value store.
 #[macro_use]
 extern crate slog;
-extern crate slog_term;
 extern crate slog_async;
+extern crate slog_term;
 
-mod error;
 mod command;
+mod error;
 
 use slog::Drain;
 
-pub use error::{Error, Result};
 pub use command::{CommandRequest, CommandResponse};
+pub use error::{Error, Result};
 
 pub fn get_default_logger() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
@@ -25,4 +25,3 @@ pub trait Engine {
     fn get(&mut self, key: String) -> Result<Option<String>>;
     fn remove(&mut self, key: String) -> Result<()>;
 }
-
